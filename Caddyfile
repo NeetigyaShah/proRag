@@ -1,0 +1,15 @@
+# Reverse proxy + automatic TLS in front of the api service (§8 Phase 5 deploy).
+#
+# For local/IP-only access, :80 with no TLS is fine (below). Once you have a
+# real domain pointed at this box's IP, replace the block below with:
+#
+# example.com {
+#     reverse_proxy api:8000
+# }
+#
+# Caddy will get and renew a Let's Encrypt cert automatically — no config beyond
+# the domain name.
+
+:80 {
+    reverse_proxy api:8000
+}

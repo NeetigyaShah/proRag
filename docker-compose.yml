@@ -1,0 +1,50 @@
+services:
+  postgres:
+    # ParadeDB = Postgres + pgvector + pg_search (real BM25). Vector search is
+    # unchanged; the keyword arm upgrades from ts_rank_cd to a BM25 index.
+    image: paradedb/paradedb:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-prorag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prorag}
+      POSTGRES_DB: ${POSTGRES_DB:-prorag}
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG18+ (ParadeDB latest) wants the mount at /var/lib/postgresql, not
+      # .../data — the data dir becomes a subdirectory of it.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prorag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./blobs:/app/blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uvicorn", "prorag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  caddy_data:

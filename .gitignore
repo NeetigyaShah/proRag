@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# env / secrets
+.env
+.env.local
+
+# Node / Next.js
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Data
+blobs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/settings.local.json

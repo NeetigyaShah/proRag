@@ -1,0 +1,215 @@
+"""SQLAlchemy models. Phase 1: documents + chunks. Phase 3 adds tables/table_rows
+and structured-document columns on chunks (bbox, heading_path, title_norm, table_id).
+Phase 4 adds chats/messages/citations. Phase 5 adds api_keys, usage, feedback.
+
+# ponytail: a `jobs` table (§7, SKIP LOCKED queue) still isn't implemented —
+# ingestion stays inline; Phase 5's retry loop lives in ingest/router.py
+# instead. Add the real queue if/when ingestion needs to run out-of-request.
+"""
+
+import uuid
+from datetime import datetime
+
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import ARRAY, FetchedValue, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+from prorag.settings import settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sha256: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    mime: Mapped[str] = mapped_column(String, nullable=False)
+    blob_path: Mapped[str] = mapped_column(String, nullable=False)
+    page_count: Mapped[int | None] = mapped_column(nullable=True)
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    title_norm: Mapped[str | None] = mapped_column(String, nullable=True)  # §4.4 revision dedup key
+    collection: Mapped[str] = mapped_column(String, nullable=False, default="default")
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    tables: Mapped[list["Table"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+
+class Chunk(Base):
+    __tablename__ = "chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    ord: Mapped[int] = mapped_column(nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="prose")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embed_text: Mapped[str] = mapped_column(Text, nullable=False)
+    heading_path: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    page_start: Mapped[int | None] = mapped_column(nullable=True)
+    page_end: Mapped[int | None] = mapped_column(nullable=True)
+    bbox: Mapped[list[float] | None] = mapped_column(ARRAY(Float), nullable=True)
+    table_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tables.id", ondelete="CASCADE"), nullable=True
+    )
+    token_count: Mapped[int] = mapped_column(nullable=False)
+    embedding = mapped_column(Vector(settings.embed_dim), nullable=False)
+    # generated column (0002) — FetchedValue keeps SQLAlchemy from including it in INSERTs
+    tsv = mapped_column(TSVECTOR, FetchedValue(), nullable=True)
+
+    document: Mapped["Document"] = relationship(back_populates="chunks")
+    table: Mapped["Table | None"] = relationship(back_populates="chunks")
+
+    __table_args__ = (Index("ix_chunks_doc_id_ord", "doc_id", "ord"),)
+
+
+class Table(Base):
+    __tablename__ = "tables"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    columns: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox: Mapped[list[float] | None] = mapped_column(ARRAY(Float), nullable=True)
+
+    document: Mapped["Document"] = relationship(back_populates="tables")
+    rows: Mapped[list["TableRow"]] = relationship(back_populates="table", cascade="all, delete-orphan")
+    chunks: Mapped[list["Chunk"]] = relationship(back_populates="table")
+
+
+class TableRow(Base):
+    __tablename__ = "table_rows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    table_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tables.id", ondelete="CASCADE"), nullable=False
+    )
+    row_no: Mapped[int] = mapped_column(nullable=False)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    table: Mapped["Table"] = relationship(back_populates="rows")
+
+    __table_args__ = (Index("ix_table_rows_table_id", "table_id"),)
+
+
+class Chat(Base):
+    __tablename__ = "chats"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    messages: Mapped[list["Message"]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chat_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String, nullable=False)  # user | assistant
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    chat: Mapped["Chat"] = relationship(back_populates="messages")
+    citations: Mapped[list["Citation"]] = relationship(back_populates="message", cascade="all, delete-orphan")
+
+    __table_args__ = (Index("ix_messages_chat_id", "chat_id"),)
+
+
+class Citation(Base):
+    """One row per [Sn] the answerer actually cited — the writer QDMS-AI's
+    dead `cited_sources` column never had (§5.3)."""
+
+    __tablename__ = "citations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    n: Mapped[int] = mapped_column(nullable=False)
+    doc_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    page: Mapped[int | None] = mapped_column(nullable=True)
+    bbox: Mapped[list[float] | None] = mapped_column(ARRAY(Float), nullable=True)
+
+    message: Mapped["Message"] = relationship(back_populates="citations")
+
+    __table_args__ = (Index("ix_citations_message_id", "message_id"),)
+
+
+class ApiKey(Base):
+    """Bearer API keys (§6, §8 Phase 5). Only the hash is stored; the raw key
+    is printed once by scripts/create_api_key.py and never persisted."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    collection: Mapped[str | None] = mapped_column(String, nullable=True)  # null = unscoped
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class Usage(Base):
+    """One row per planner/answer/embedding LLM call (§5.4). `message_id` is
+    nullable because planner + embedding calls happen before a message exists."""
+
+    __tablename__ = "usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (Index("ix_usage_created_at", "created_at"),)
+
+
+class Feedback(Base):
+    """Like/dislike on a message (§6 /feedback). One row per message; posting
+    the same rating again toggles it off, same as QDMS-AI."""
+
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    rating: Mapped[str] = mapped_column(String, nullable=False)  # up | down
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_feedback_message_id", "message_id"),
+        UniqueConstraint("message_id", name="uq_feedback_message_id"),
+    )
+
+
+class EvalRun(Base):
+    """One row per `POST /eval/run` (§6, §8 Phase 6). `questions` is the
+    per-question JSONB (answer + deterministic scores); `aggregate` is the
+    mean of those plus ragas scores when ragas is installed."""
+
+    __tablename__ = "eval_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    questions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    aggregate: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+      - name: pytest (pure-function suite — no DB, no LLM keys needed)
+        run: pytest
+
+  # Eval regression: runs the golden set against a live Postgres + reranker
+  # and fails the build on a faithfulness/hit-rate regression. Commented out
+  # because it needs secrets this repo doesn't have by default:
+  #   - a real LLM provider key (OPENAI_API_KEY or equivalent) for the
+  #     planner/answerer/embeddings
+  #   - `pip install ragas datasets` (optional import, see pyproject.toml)
+  #
+  # To enable: add a `postgres:16` service (pgvector image, see
+  # docker-compose.yml) with health checks, add OPENAI_API_KEY (or your
+  # provider's key) as a repo secret, uncomment the job below, and adjust the
+  # DATABASE_URL to point at the service container.
+  #
+  # eval-regression:
+  #   runs-on: ubuntu-latest
+  #   services:
+  #     postgres:
+  #       image: pgvector/pgvector:pg16
+  #       env:
+  #         POSTGRES_USER: prorag
+  #         POSTGRES_PASSWORD: prorag
+  #         POSTGRES_DB: prorag
+  #       ports: ["5432:5432"]
+  #       options: >-
+  #         --health-cmd pg_isready
+  #         --health-interval 10s
+  #         --health-timeout 5s
+  #         --health-retries 5
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.12"
+  #     - run: pip install -e ".[dev]" ragas datasets
+  #     - run: alembic upgrade head
+  #       env:
+  #         DATABASE_URL: postgresql+asyncpg://prorag:prorag@localhost:5432/prorag
+  #     - name: run golden eval and fail on regression
+  #       env:
+  #         DATABASE_URL: postgresql+asyncpg://prorag:prorag@localhost:5432/prorag
+  #         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  #       run: python -c "
+  #         import asyncio
+  #         from prorag.db import SessionLocal
+  #         from prorag.eval.runner import run_eval
+
+  #         async def main():
+  #             async with SessionLocal() as session:
+  #                 result = await run_eval(session)
+  #             agg = result['aggregate']
+  #             assert agg['hit_rate'] >= 0.7, agg
+  #             assert agg['citation_validity'] >= 0.95, agg
+
+  #         asyncio.run(main())
+  #         "

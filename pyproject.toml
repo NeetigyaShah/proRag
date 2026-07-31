@@ -1,0 +1,53 @@
+[project]
+name = "prorag"
+version = "0.1.0"
+description = "Small self-hostable RAG platform — Phase 1 MVP"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pgvector>=0.3",
+    "litellm>=1.50",
+    "pymupdf>=1.24",
+    "pydantic-settings>=2.4",
+    "python-multipart>=0.0.9",
+    "sentence-transformers>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.6"]
+# ragas is deliberately NOT listed here — prorag/eval/runner.py imports it
+# lazily and degrades to "skipped" when it's absent (§8 Phase 6). Install
+# it yourself (`pip install ragas datasets`) to get faithfulness/
+# answer_relevancy/context_precision scores.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["prorag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # long docstring/comment lines are common in this codebase's prose-heavy style
+    "B008",  # FastAPI's Depends()/File() in argument defaults is the framework's own idiom, not a bug
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B017"]  # pytest.raises(Exception) is intentional in a couple of "garbage input" tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["prorag"]
