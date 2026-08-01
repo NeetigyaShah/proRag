@@ -50,6 +50,9 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source]
     message_id: uuid.UUID | None = None
+    # Set when the caller is over their per-user soft cap but under the hard
+    # one (#9's resolution, #21) — the answer still ran, this is advisory.
+    budget_warning: str | None = None
 
 
 class FeedbackRequest(BaseModel):

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from prorag.auth import current_user
 from prorag.chat.citations import build_context_block, extract_cited_indices, normalize_citations, resolve_citations
 from prorag.chat.stream import HEARTBEAT_INTERVAL_SECONDS, TokenGuard, sse_comment, sse_event, sse_retry
-from prorag.cost import over_daily_cap, today_cost_usd, track_usage
+from prorag.cost import budget_decision, over_daily_cap, today_cost_usd, today_user_cost_usd, track_usage
 from prorag.db import get_session
 from prorag.llm import answer, answer_stream, embed_texts, estimate_tokens
 from prorag.models import Chat, Citation, Feedback, Message, User
@@ -52,11 +52,12 @@ async def retrieve(session: AsyncSession, message: str, user: User | None = None
     before LIMIT/rerank/crop ever see a row — None (auth disabled, legacy
     unscoped key, or the eval runner's service-user — see eval/runner.py)
     means unfiltered, same as today."""
-    plan_result = await plan(message, session=session)
+    user_id = user.id if user is not None else None
+    plan_result = await plan(message, session=session, user_id=user_id)
     queries = plan_result["queries"]  # [primary, alternative]
     wants_table = plan_result.get("mode") == "table"
 
-    embeddings = await embed_texts(queries, session=session)
+    embeddings = await embed_texts(queries, session=session, user_id=user_id)
     # Sequential, not asyncio.gather: an AsyncSession is a single connection and
     # is not concurrency-safe. Gathering these raised InvalidRequestError
     # ("session is provisioning a new connection") whenever the session arrived
@@ -148,34 +149,60 @@ async def persist_exchange(
     return chat_id, assistant_message.id
 
 
-async def check_daily_cap(session: AsyncSession) -> None:
-    """Runs BEFORE any LLM call (§5.4, §8 Phase 5) — a day over budget returns
-    429 without spending another token. Shared with /eval/run, which spends one
-    answer call per golden entry."""
+async def check_daily_cap(session: AsyncSession, user: User | None = None) -> str | None:
+    """Runs BEFORE any LLM call (§5.4, §8 Phase 5, #21) — install-wide check
+    first, unchanged semantics: a day over budget returns 429 without spending
+    another token. Shared with /eval/run, which spends one answer call per
+    golden entry — and, like /chat, can overshoot the cap by exactly one call
+    since the check runs before spend, not after (accepted per #9.4, not
+    reservation machinery).
+
+    Then the per-user soft/hard cap (#9's resolution, #21): `user=None` (auth
+    disabled, legacy unscoped key, /eval/run's service work) skips it entirely
+    — only the install-wide check above applies. Otherwise returns a warning
+    string when the user is over their soft cap but under the hard multiplier
+    (the caller threads it onto the response/SSE stream), or raises 429 once
+    the hard cap is reached."""
     spent = await today_cost_usd(session)
     if over_daily_cap(spent, settings.daily_cost_cap_usd):
         raise HTTPException(
             429, f"daily cost cap of ${settings.daily_cost_cap_usd:.2f} reached (${spent:.2f} spent today)"
         )
 
+    if user is None:
+        return None
+
+    cap = user.daily_cap_usd_override if user.daily_cap_usd_override is not None else settings.user_daily_cap_usd
+    user_spent = await today_user_cost_usd(session, user.id)
+    decision = budget_decision(user_spent, cap, settings.user_hard_cap_multiplier)
+
+    if decision == "block":
+        hard_cap = cap * settings.user_hard_cap_multiplier
+        raise HTTPException(429, f"you have used ${user_spent:.2f} of ${hard_cap:.2f} today, resets at midnight UTC")
+    if decision == "warn":
+        return f"you have used ${user_spent:.2f} of ${cap:.2f} today, resets at midnight UTC"
+    return None
+
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     req: ChatRequest, session: AsyncSession = Depends(get_session), user: User | None = Depends(current_user)
 ):
-    await check_daily_cap(session)
+    budget_warning = await check_daily_cap(session, user)
 
     hits = await retrieve(session, req.message, user=user)
 
     user_prompt = build_prompt(req.message, hits)
-    raw_answer = await answer(SYSTEM_PROMPT, user_prompt, session=session)
+    raw_answer = await answer(
+        SYSTEM_PROMPT, user_prompt, session=session, user_id=(user.id if user is not None else None)
+    )
 
     normalized = normalize_citations(raw_answer)
     resolved = resolve_citations(normalized, hits)
     sources = [_to_source(r["n"], r) for r in resolved]
 
     chat_id, message_id = await persist_exchange(session, req.chat_id, req.message, normalized, sources)
-    return ChatResponse(answer=normalized, sources=sources, message_id=message_id)
+    return ChatResponse(answer=normalized, sources=sources, message_id=message_id, budget_warning=budget_warning)
 
 
 @router.post("/feedback")
@@ -208,7 +235,7 @@ async def chat_stream(
     """SSE per §5.2: sources[] before the first token (trust rule — every
     chunk the crop selected, not just what got cited), then token/citation
     events as they arrive, then meta + done."""
-    await check_daily_cap(session)  # before the LLM is ever touched, not inside the generator
+    budget_warning = await check_daily_cap(session, user)  # before the LLM is ever touched, not inside the generator
 
     async def event_source():
         yield sse_retry()
@@ -230,6 +257,8 @@ async def chat_stream(
         hits = await retrieve(session, req.message, user=user)
         all_sources = [_to_source(i, h) for i, h in enumerate(hits, start=1)]
         yield sse_event("sources", [s.model_dump(mode="json") for s in all_sources])
+        if budget_warning is not None:
+            yield sse_event("budget", {"warning": budget_warning})
 
         user_prompt = build_prompt(req.message, hits)
         guard = TokenGuard()
@@ -283,7 +312,13 @@ async def chat_stream(
         else:
             prompt_tokens = estimate_tokens(settings.answer_model, SYSTEM_PROMPT + user_prompt)
             completion_tokens = estimate_tokens(settings.answer_model, raw_answer)
-        track_usage(session, settings.answer_model, prompt_tokens, completion_tokens)
+        track_usage(
+            session,
+            settings.answer_model,
+            prompt_tokens,
+            completion_tokens,
+            user_id=(user.id if user is not None else None),
+        )
 
         cited_sources = [s for s in all_sources if s.n in cited_seen]
         chat_id, message_id = await persist_exchange(session, req.chat_id, req.message, normalized, cited_sources)

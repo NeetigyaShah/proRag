@@ -183,6 +183,9 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Admin override for the per-user soft cap (0010, #21) — null means "use
+    # settings.user_daily_cap_usd". The dashboard edits this later (#10).
+    daily_cap_usd_override: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     disabled_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
@@ -298,7 +301,12 @@ class Usage(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # explicit timezone=True (bug found while building #21's UTC-window query):
+    # the DB column is TIMESTAMPTZ (migration 0005), but without this SQLAlchemy
+    # infers a naive TIMESTAMP on the Python side and asyncpg rejects the
+    # tz-aware `datetime` today_cost_usd()/today_user_cost_usd() compare
+    # against — same footgun Session.expires_at's docstring already documents.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index("ix_usage_created_at", "created_at"),

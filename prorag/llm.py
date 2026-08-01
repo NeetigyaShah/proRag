@@ -77,7 +77,7 @@ async def embed_texts_batched(texts: list[str], session=None) -> list[list[float
     return [vec for batch_result in results for vec in batch_result]
 
 
-async def embed_texts(texts: list[str], session=None) -> list[list[float]]:
+async def embed_texts(texts: list[str], session=None, user_id=None) -> list[list[float]]:
     if not texts:
         return []
     if settings.embed_model.startswith("openrouter-embed/"):
@@ -107,11 +107,11 @@ async def embed_texts(texts: list[str], session=None) -> list[list[float]]:
         return [v.tolist() for v in vectors]
     resp = await litellm.aembedding(model=settings.embed_model, input=texts)
     prompt_tokens, completion_tokens = _usage_tokens(resp)
-    track_usage(session, settings.embed_model, prompt_tokens, completion_tokens)
+    track_usage(session, settings.embed_model, prompt_tokens, completion_tokens, user_id=user_id)
     return [item["embedding"] for item in resp["data"]]
 
 
-async def answer(system: str, user: str, session=None, message_id=None) -> str:
+async def answer(system: str, user: str, session=None, message_id=None, user_id=None) -> str:
     resp = await litellm.acompletion(
         model=settings.answer_model,
         messages=[
@@ -121,7 +121,7 @@ async def answer(system: str, user: str, session=None, message_id=None) -> str:
         **_reasoning_kwargs(settings.answer_model),
     )
     prompt_tokens, completion_tokens = _usage_tokens(resp)
-    track_usage(session, settings.answer_model, prompt_tokens, completion_tokens, message_id=message_id)
+    track_usage(session, settings.answer_model, prompt_tokens, completion_tokens, message_id=message_id, user_id=user_id)
     return resp["choices"][0]["message"]["content"]
 
 
@@ -164,7 +164,7 @@ async def answer_stream(system: str, user: str):
             yield ("answer", delta)
 
 
-async def plan_completion(system: str, user: str, session=None) -> str:
+async def plan_completion(system: str, user: str, session=None, user_id=None) -> str:
     """Cheap-tier call for the planner (§4.1). Separate from answer() so the
     two tiers can point at different models via settings."""
     resp = await litellm.acompletion(
@@ -176,5 +176,5 @@ async def plan_completion(system: str, user: str, session=None) -> str:
         **_reasoning_kwargs(settings.planner_model),
     )
     prompt_tokens, completion_tokens = _usage_tokens(resp)
-    track_usage(session, settings.planner_model, prompt_tokens, completion_tokens)
+    track_usage(session, settings.planner_model, prompt_tokens, completion_tokens, user_id=user_id)
     return resp["choices"][0]["message"]["content"]

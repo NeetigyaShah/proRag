@@ -1,21 +1,25 @@
 """Pure-function tests for Phase 5 operations: key hashing/verification, cost
-computation fallback, and the daily-cap decision logic. No DB, no LLM, no
-network — the DB sum itself (today_cost_usd) is mocked out, only the pure
-decision function over_daily_cap() is exercised directly, per §8 Phase 5."""
+computation fallback, and the daily-cap decision logic. Mostly no DB, no LLM,
+no network — the DB sum itself (today_cost_usd) is mocked out, only the pure
+decision functions (over_daily_cap, budget_decision) are exercised directly,
+per §8 Phase 5. The one exception is the today_user_cost_usd windowing test
+(#21), which is DB-backed the same way tests/test_identity_schema.py is —
+skips cleanly if the DB is unreachable."""
 
 import asyncio
 import time
 import uuid
+from datetime import UTC, datetime, timedelta, timezone
 
 import litellm
 import pytest
 from pydantic import ValidationError
-
-from datetime import datetime, timedelta, timezone
+from sqlalchemy import delete, text
 
 from prorag.auth import hash_key, new_api_key
-from prorag.cost import _utc_day_start, compute_cost, over_daily_cap, track_usage
-from prorag.models import Usage
+from prorag.cost import _utc_day_start, budget_decision, compute_cost, over_daily_cap, today_user_cost_usd, track_usage
+from prorag.db import SessionLocal, engine
+from prorag.models import Usage, User
 from prorag.schemas import ChatRequest, FeedbackRequest, IngestResponse
 from prorag.settings import settings
 
@@ -107,7 +111,7 @@ def test_utc_day_start_is_midnight_utc_not_local():
     # 11pm on Jan 1 at UTC-5 is already Jan 2 in UTC — date.today() (local)
     # would wrongly anchor the window to Jan 1.
     now = datetime(2024, 1, 1, 23, 0, tzinfo=timezone(timedelta(hours=-5)))
-    assert _utc_day_start(now) == datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+    assert _utc_day_start(now) == datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
 
 
 def test_utc_day_start_is_tz_aware():
@@ -131,6 +135,99 @@ def test_over_daily_cap_true_when_over_budget():
 
 def test_over_daily_cap_false_at_zero_spend():
     assert over_daily_cap(0.0, cap=5.0) is False
+
+
+# ---- per-user soft/hard cap decision (#21) -------------------------------------
+# `cap` here is whatever check_daily_cap() already resolved (user override or
+# settings.user_daily_cap_usd) — budget_decision() itself doesn't know or care
+# which; testing it at a couple of different cap values covers "override
+# present" (e.g. cap=2.5) vs "override absent" (the settings default, 1.0) the
+# same way, since the override is resolved before this function ever runs.
+
+
+@pytest.mark.parametrize(
+    "spent,cap,multiplier,expected",
+    [
+        (0.0, 1.0, 2.0, "ok"),  # zero spend
+        (0.99, 1.0, 2.0, "ok"),  # under the soft cap
+        (1.0, 1.0, 2.0, "warn"),  # exactly at the soft cap
+        (1.5, 1.0, 2.0, "warn"),  # between soft and hard
+        (1.99, 1.0, 2.0, "warn"),  # just under the hard cap
+        (2.0, 1.0, 2.0, "block"),  # exactly at the hard cap (cap * multiplier)
+        (5.0, 1.0, 2.0, "block"),  # well past the hard cap
+        # same matrix again at a per-user override cap, not the settings default
+        (2.49, 2.5, 2.0, "ok"),
+        (2.5, 2.5, 2.0, "warn"),
+        (5.0, 2.5, 2.0, "block"),
+    ],
+)
+def test_budget_decision_matrix(spent, cap, multiplier, expected):
+    assert budget_decision(spent, cap, multiplier) == expected
+
+
+# ---- today_user_cost_usd UTC-midnight windowing (#21, DB-backed) --------------
+# Inserts rows with an explicit created_at straddling _utc_day_start() and
+# checks only the row on the "today" side of the boundary is summed. Skips
+# cleanly if the DB is unreachable, same pattern as test_identity_schema.py.
+
+
+async def _get_db_session():
+    try:
+        session = SessionLocal()
+        await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        pytest.skip(f"database unavailable: {exc}")
+    return session
+
+
+async def test_today_user_cost_usd_only_sums_rows_since_utc_midnight():
+    session = await _get_db_session()
+    tag = uuid.uuid4().hex[:8]
+
+    try:
+        async with session:
+            user = User(email=f"{tag}@example.com")
+            session.add(user)
+            await session.flush()
+
+            start = _utc_day_start()
+            just_inside = start + timedelta(seconds=1)
+            just_outside = start - timedelta(seconds=1)
+
+            session.add_all(
+                [
+                    Usage(
+                        model="gpt-4o-mini",
+                        prompt_tokens=10,
+                        completion_tokens=5,
+                        cost_usd=1.23,
+                        user_id=user.id,
+                        created_at=just_inside,
+                    ),
+                    Usage(
+                        model="gpt-4o-mini",
+                        prompt_tokens=10,
+                        completion_tokens=5,
+                        cost_usd=9.99,
+                        user_id=user.id,
+                        created_at=just_outside,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            try:
+                total = await today_user_cost_usd(session, user.id)
+                assert total == pytest.approx(1.23)
+            finally:
+                await session.execute(delete(Usage).where(Usage.user_id == user.id))
+                await session.execute(delete(User).where(User.id == user.id))
+                await session.commit()
+    finally:
+        # pytest-asyncio gives each test its own event loop; pooled connections
+        # left open here would stay bound to this (now-closing) loop and blow up
+        # the next DB test's checkout. Dispose so the next test gets fresh ones.
+        await engine.dispose()
 
 
 # ---- request schema validation ------------------------------------------------

@@ -30,6 +30,8 @@ async def eval_run(session: AsyncSession = Depends(get_session)):
     # ponytail: checked once up front, not per question — a single run can
     # overshoot the cap by one golden set, same way /chat can overshoot by one
     # answer. Move the check inside run_eval's loop if that ever matters.
+    # user=None (#21): this is service work, not a per-user request — install-
+    # wide semantics only, same as before per-user budgets existed.
     await check_daily_cap(session)
     try:
         async with asyncio.timeout(settings.eval_timeout_seconds):

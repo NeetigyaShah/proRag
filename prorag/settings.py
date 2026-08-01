@@ -50,7 +50,13 @@ class Settings(BaseSettings):
 
     # Phase 5: operations
     auth_enabled: bool = False  # off by default so the local UI keeps working without keys
-    daily_cost_cap_usd: float = 5.0
+    daily_cost_cap_usd: float = 5.0  # install-wide hard cap (unchanged, #9's resolution)
+
+    # #21: per-user budgets on top of the install-wide cap above. Soft at 1x
+    # (request still runs, response carries a warning), hard at the multiplier
+    # (429). Overridable per user via users.daily_cap_usd_override (0010).
+    user_daily_cap_usd: float = 1.0
+    user_hard_cap_multiplier: float = 2.0
 
     # Phase 6: sessions + OIDC (#19)
     session_cookie_secure: bool = True  # set false in .env for local http:// dev

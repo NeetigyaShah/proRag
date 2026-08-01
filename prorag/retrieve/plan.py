@@ -55,16 +55,17 @@ def _fallback(query: str) -> dict:
     return {"search_needed": True, "queries": [query, query], "mode": "default"}
 
 
-async def plan(query: str, session=None) -> dict:
+async def plan(query: str, session=None, user_id=None) -> dict:
     """Never raises. On any planner or parse failure, degrades to running the
     raw query verbatim (search_needed=True) rather than failing the request.
 
     `session`, when given, is forwarded to plan_completion() so the planner
-    call's cost gets tracked (§5.4). Left out of the call entirely when None
-    so tests that monkeypatch plan_completion with a 2-arg stub keep working."""
+    call's cost gets tracked (§5.4), same for `user_id` (#21). Left out of the
+    call entirely when session is None so tests that monkeypatch
+    plan_completion with a 2-arg stub keep working."""
     try:
         if session is not None:
-            raw = await plan_completion(SYSTEM_PROMPT, query, session=session)
+            raw = await plan_completion(SYSTEM_PROMPT, query, session=session, user_id=user_id)
         else:
             raw = await plan_completion(SYSTEM_PROMPT, query)
     except Exception:

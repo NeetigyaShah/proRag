@@ -164,8 +164,8 @@ def patched_retrieve(monkeypatch):
         await session.execute()
         return []
 
-    monkeypatch.setattr(cr, "plan", lambda q, session=None: _async({"queries": [q, q], "mode": "table"}))
-    monkeypatch.setattr(cr, "embed_texts", lambda t, session=None: _async([[0.0], [0.0]]))
+    monkeypatch.setattr(cr, "plan", lambda q, session=None, **_kw: _async({"queries": [q, q], "mode": "table"}))
+    monkeypatch.setattr(cr, "embed_texts", lambda t, session=None, **_kw: _async([[0.0], [0.0]]))
     monkeypatch.setattr(cr, "rerank", lambda q, hits: _async(hits))
     monkeypatch.setattr(cr, "vector_search", arm)
     monkeypatch.setattr(cr, "keyword_search", arm)

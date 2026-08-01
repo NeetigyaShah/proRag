@@ -4,7 +4,7 @@ first; a flat per-1k-token price fallback when the model has no litellm price en
 (local ONNX embeddings, custom LiteLLM proxy names).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import litellm
 from sqlalchemy import func, select
@@ -30,10 +30,16 @@ def track_usage(
     prompt_tokens: int,
     completion_tokens: int = 0,
     message_id=None,
+    user_id=None,
 ) -> float | None:
     """Adds a `usage` row to `session` (caller commits). Returns the computed
     cost, or None if no session was given — call sites without a session yet
-    (e.g. a bare script) simply skip tracking instead of erroring."""
+    (e.g. a bare script) simply skip tracking instead of erroring.
+
+    `user_id` (#21) attributes the spend for the per-user budget query below;
+    None (the default) is system/service work — planner+embed calls with no
+    session yet, ingest embeds, /eval/run — same "no attribution" meaning
+    unscoped usage rows already had pre-#21."""
     if session is None:
         return None
     cost = compute_cost(model, prompt_tokens, completion_tokens)
@@ -44,6 +50,7 @@ def track_usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cost_usd=cost,
+            user_id=user_id,
         )
     )
     return cost
@@ -52,8 +59,8 @@ def track_usage(
 def _utc_day_start(now: datetime | None = None) -> datetime:
     """UTC midnight for `now` (defaults to current UTC time), tz-aware — split
     out so the window logic is testable without a DB (§8 Phase 5 tests)."""
-    now = now or datetime.now(timezone.utc)
-    return now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    now = now or datetime.now(UTC)
+    return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 async def today_cost_usd(session: AsyncSession) -> float:
@@ -67,7 +74,40 @@ async def today_cost_usd(session: AsyncSession) -> float:
     return float(total)
 
 
+async def today_user_cost_usd(session: AsyncSession, user_id) -> float:
+    """Same UTC-window shape as today_cost_usd(), scoped to one user (#21) —
+    backs the per-user soft/hard cap. Uses the same _utc_day_start() so the
+    two windows can never drift apart."""
+    start = _utc_day_start()
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(Usage.cost_usd), 0.0)).where(
+                Usage.user_id == user_id, Usage.created_at >= start
+            )
+        )
+    ).scalar_one()
+    return float(total)
+
+
 def over_daily_cap(today_total: float, cap: float) -> bool:
     """Pure decision logic, split out from today_cost_usd() so it's testable
     without a DB (§8 Phase 5 tests)."""
     return today_total >= cap
+
+
+def budget_decision(spent: float, cap: float, hard_multiplier: float) -> str:
+    """Pure per-user soft/hard cap decision (#9's resolution, #21), split out
+    the same way over_daily_cap() is so it's testable without a DB. `cap` is
+    already resolved (user.daily_cap_usd_override or settings.user_daily_cap_usd
+    — check_daily_cap()'s job, not this function's).
+
+    - spent < cap            -> 'ok'    (under budget)
+    - cap <= spent < cap*mult -> 'warn'  (request runs, response carries a warning)
+    - spent >= cap*mult       -> 'block' (429 — the accepted overshoot per #9.4
+      is one answer at the soft cap, not an unbounded one past the hard cap)
+    """
+    if spent >= cap * hard_multiplier:
+        return "block"
+    if spent >= cap:
+        return "warn"
+    return "ok"
