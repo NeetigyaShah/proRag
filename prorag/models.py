@@ -17,6 +17,7 @@ from sqlalchemy import (
     ARRAY,
     Boolean,
     CheckConstraint,
+    DateTime,
     FetchedValue,
     Float,
     ForeignKey,
@@ -171,7 +172,8 @@ class User(Base):
     """A principal (#2): the deployment is the tenant, the user is who budgets
     and grants attach to. `external_subject` is the IdP `sub`, null for local
     accounts. Group membership is never read from token claims per-request —
-    `user_groups` rows are the truth (#2)."""
+    `user_groups` rows are the truth (#2). `password_hash` (0009, #19) is
+    nullable because OIDC-only users have none."""
 
     __tablename__ = "users"
 
@@ -180,6 +182,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     disabled_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
@@ -239,6 +242,30 @@ class DocumentAcl(Base):
         Index("ix_document_acl_doc_id", "doc_id"),
         Index("ix_document_acl_principal", "principal_type", "principal_id"),
     )
+
+
+class Session(Base):
+    """A server-side session (0009, #19) backing the `prorag_session` cookie.
+    Same idiom as `ApiKey`: only `token_hash` is stored, the raw token is
+    handed to the browser once. `revoked_at` lets logout invalidate a session
+    without waiting for `expires_at` — this is why sessions exist instead of a
+    self-verifying JWT (#2's resolution: "nothing to revoke server-side is the
+    wrong default")."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # explicit timezone=True: unlike created_at/revoked_at's server-side
+    # defaults elsewhere in this file, expires_at is always a Python-supplied
+    # value (create_session()) — without this, SQLAlchemy binds it as
+    # TIMESTAMP WITHOUT TIME ZONE and asyncpg rejects the tz-aware datetime.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ApiKey(Base):

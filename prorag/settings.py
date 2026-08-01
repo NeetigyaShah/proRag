@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     # Phase 5: operations
     auth_enabled: bool = False  # off by default so the local UI keeps working without keys
     daily_cost_cap_usd: float = 5.0
+
+    # Phase 6: sessions + OIDC (#19)
+    session_cookie_secure: bool = True  # set false in .env for local http:// dev
+    session_ttl_days: int = 7
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: str | None = None
+    oidc_redirect_path: str = "/auth/oidc/callback"
     eval_timeout_seconds: float = 900.0  # whole golden-set run; ~50 questions × LLM latency
     # Must stay well under both db_pool_timeout and the orchestrator's own probe
     # timeout, or a saturated pool reads as a hang instead of a 503.

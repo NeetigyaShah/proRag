@@ -9,7 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from prorag.auth import require_api_key
+from prorag.auth import require_auth
+from prorag.auth_routes import router as auth_router
 from prorag.chat.router import router as chat_router
 from prorag.db import engine, get_session
 from prorag.eval.router import router as eval_router
@@ -40,14 +41,18 @@ app = FastAPI(title="ProRag", version="0.1.0", lifespan=lifespan)
 app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(GZipSkipSSEMiddleware)
 
-# Bearer auth on every route except /healthz, /readyz, and /web static (§6, §8
-# Phase 5). No-ops when settings.auth_enabled is False (local dev default).
-_auth = [Depends(require_api_key)]
+# Session-cookie-or-bearer-key auth on every route except /healthz, /readyz,
+# /web static, and /auth/* itself (§6, §8 Phase 5; sessions #19). No-ops when
+# settings.auth_enabled is False (local dev default).
+_auth = [Depends(require_auth)]
 app.include_router(ingest_router, dependencies=_auth)
 app.include_router(chat_router, dependencies=_auth)
 app.include_router(files_router, dependencies=_auth)
 app.include_router(search_router, dependencies=_auth)
 app.include_router(eval_router, dependencies=_auth)
+
+# Login must be reachable unauthenticated — no _auth dependency here.
+app.include_router(auth_router)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 if WEB_DIR.is_dir():

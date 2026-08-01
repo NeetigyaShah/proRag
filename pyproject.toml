@@ -15,10 +15,13 @@ dependencies = [
     "pydantic-settings>=2.4",
     "python-multipart>=0.0.9",
     "sentence-transformers>=3.0",
+    "argon2-cffi>=23.1",
+    "authlib>=1.3",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
 # ragas is deliberately NOT listed here — prorag/eval/runner.py imports it
 # lazily and degrades to "skipped" when it's absent (§8 Phase 6). Install
 # it yourself (`pip install ragas datasets`) to get faithfulness/
