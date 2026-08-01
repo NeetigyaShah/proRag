@@ -1,5 +1,6 @@
 """Every tunable lives here, nowhere else."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -63,6 +64,32 @@ class Settings(BaseSettings):
     # timeout, or a saturated pool reads as a hang instead of a 503.
     readyz_timeout_seconds: float = 5.0
     fallback_price_per_1k_usd: float = 0.002  # used only when litellm has no price entry for a model
+
+    # ---- sanity checks (#20) ---------------------------------------------------
+    # Deliberately narrow: obviously-nonsensical values that would otherwise fail
+    # confusingly deep inside a request instead of at boot. Not exhaustive —
+    # EMBED_DIM-vs-index mismatch etc. is `prorag doctor`'s job, not startup's.
+
+    @field_validator("daily_cost_cap_usd")
+    @classmethod
+    def _daily_cost_cap_must_be_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"daily_cost_cap_usd must be > 0, got {v}")
+        return v
+
+    @field_validator("session_ttl_days")
+    @classmethod
+    def _session_ttl_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"session_ttl_days must be > 0, got {v}")
+        return v
+
+    @field_validator("blob_dir")
+    @classmethod
+    def _blob_dir_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("blob_dir must not be empty")
+        return v
 
 
 settings = Settings()

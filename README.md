@@ -80,18 +80,20 @@ git clone <this repo> && cd ragPro
 cp .env.example .env   # fill in provider key(s), set AUTH_ENABLED=true, pick a real DAILY_COST_CAP_USD
 
 docker compose up -d postgres
-docker compose run --rm api alembic upgrade head
 uv run python scripts/create_api_key.py --name prod   # save the printed key
 
-docker compose up -d
+docker compose up -d   # api's entrypoint runs `alembic upgrade head` itself before serving
+docker compose exec api python -m prorag.doctor   # day-one smoke check — OK/WARN/FAIL per setting
 ```
 
 This brings up `postgres`, `api` (port 8000, not exposed publicly beyond the compose
 network once Caddy is in front), and `caddy` (ports 80/443) reverse-proxying to `api`.
 Edit `Caddyfile`: replace the `:80 { ... }` block with your real domain
 (`example.com { reverse_proxy api:8000 }`) once DNS points at the box — Caddy fetches
-and renews the TLS cert automatically, no extra config. Blobs persist on the host at
-`./blobs`; Postgres data lives in the `pgdata` named volume.
+and renews the TLS cert automatically, no extra config. Blobs persist in the `blobdata`
+named volume (`docker volume inspect prorag_blobdata` for its host path — a compose
+volume survives `docker compose down`, just not `down -v`); Postgres data lives in the
+`pgdata` named volume the same way.
 
 ## Evaluation & tuning (Phase 6)
 

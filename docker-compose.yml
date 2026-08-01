@@ -21,19 +21,23 @@ services:
       retries: 10
 
   api:
+    # image: tags the versioned bundle (ghcr.io/...:v0.x per #8's resolution);
+    # build: stays so `docker compose up` still works straight from source in dev.
+    image: ${PRORAG_IMAGE:-prorag-api}:${PRORAG_VERSION:-dev}
     build: .
     restart: unless-stopped
     env_file: .env
     expose:
       - "8000"
     volumes:
-      - ./blobs:/app/blobs
+      - blobdata:/app/blobs
     depends_on:
       postgres:
         condition: service_healthy
-    # --forwarded-allow-ips=* is safe here: 8000 isn't published to the host (see
-    # `expose` above), so only the caddy service on the compose network can reach it.
-    command: ["uvicorn", "prorag.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
+    # No command: override — the image's own ENTRYPOINT (docker-entrypoint.sh)
+    # runs migrations then execs its CMD, uvicorn with --forwarded-allow-ips=*,
+    # which is safe here because 8000 isn't published to the host (see `expose`
+    # above), so only the caddy service on the compose network can reach it.
 
   caddy:
     image: caddy:2-alpine
@@ -50,3 +54,4 @@ services:
 volumes:
   pgdata:
   caddy_data:
+  blobdata:
