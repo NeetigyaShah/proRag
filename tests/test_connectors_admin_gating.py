@@ -31,19 +31,29 @@ async def _get_session():
 
 
 async def test_connectors_wide_open_when_auth_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "auth_enabled", False)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/connectors")
-    assert resp.status_code == 200
+    # The route hits the shared engine via get_session even with no explicit
+    # SessionLocal() call here — dispose in a finally so this test's event
+    # loop doesn't leave pooled connections a later test's loop can't reuse
+    # (tests/test_identity_schema.py's documented pattern).
+    try:
+        monkeypatch.setattr(settings, "auth_enabled", False)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/connectors")
+        assert resp.status_code == 200
+    finally:
+        await engine.dispose()
 
 
 async def test_connectors_401_with_no_credentials_when_auth_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "auth_enabled", True)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/connectors")
-    assert resp.status_code == 401
+    try:
+        monkeypatch.setattr(settings, "auth_enabled", True)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/connectors")
+        assert resp.status_code == 401
+    finally:
+        await engine.dispose()
 
 
 async def test_connectors_403_for_authenticated_non_admin_then_200_for_admin(monkeypatch):
