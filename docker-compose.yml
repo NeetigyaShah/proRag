@@ -24,14 +24,16 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./blobs:/app/blobs
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["uvicorn", "prorag.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # --forwarded-allow-ips=* is safe here: 8000 isn't published to the host (see
+    # `expose` above), so only the caddy service on the compose network can reach it.
+    command: ["uvicorn", "prorag.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]
 
   caddy:
     image: caddy:2-alpine

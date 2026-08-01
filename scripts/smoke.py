@@ -1,8 +1,10 @@
 """Manual end-to-end smoke script for Phase 1.
 
-Requires the API running (docker compose up, or `uvicorn prorag.main:app`)
-against a real Postgres with the migration applied, and a working LiteLLM
-provider (OPENAI_API_KEY or equivalent set in .env).
+Requires the API reachable on the host at :8000 (`uvicorn prorag.main:app`
+directly, or `docker compose up postgres` + running the api outside compose —
+the full `docker compose up` stack no longer publishes 8000, only caddy's
+80/443) against a real Postgres with the migration applied, and a working
+LiteLLM provider (OPENAI_API_KEY or equivalent set in .env).
 
 Usage:
     python scripts/smoke.py path/to/some.pdf "What does the document say about X?"
