@@ -2,7 +2,9 @@
 and structured-document columns on chunks (bbox, heading_path, title_norm, table_id).
 Phase 4 adds chats/messages/citations. Phase 5 adds api_keys, usage, feedback.
 0008 adds identity + ACL (users, groups, user_groups, document_acl) per the
-decisions in #2 and #15 — schema only, no enforcement (that's #18).
+decisions in #2 and #15 — schema only, no enforcement (that's #18). 0011 adds
+connectors + connector_items (#22): the first sync-engine source (S3), Tier C
+per #15 (no ACLs to mirror, so no document_acl rows — admin-only by default).
 
 # ponytail: a `jobs` table (§7, SKIP LOCKED queue) still isn't implemented —
 # ingestion stays inline; Phase 5's retry loop lives in ingest/router.py
@@ -331,6 +333,69 @@ class Feedback(Base):
     __table_args__ = (
         Index("ix_feedback_message_id", "message_id"),
         UniqueConstraint("message_id", name="uq_feedback_message_id"),
+    )
+
+
+class Connector(Base):
+    """A configured source (#22, #15's polling-first architecture). `type` is
+    currently only 's3' (S3-compatible object storage — AWS/MinIO/R2, the
+    plumbing connector per #6: cheapest to stand up, no source ACLs to
+    mirror). `config` holds endpoint_url/bucket/prefix/access key id/secret
+    plus an optional `collection` — the secret is stored as plain JSONB v1;
+    an env-ref indirection (`{"$env": "MY_SECRET"}`-style) is the natural
+    upgrade path once this surface is wider than admin-only. `last_sync_at`
+    drives the next incremental poll's client-side since-filter (S3 has no
+    server-side "changed since" list filter); `last_full_sweep_at` is
+    informational (the mandatory reconciliation sweep per #15 doesn't use it
+    for filtering — it always lists everything to catch deletes/moves)."""
+
+    __tablename__ = "connectors"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_full_sweep_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ConnectorItem(Base):
+    """One row per remote object a connector has ever seen (#22) — the diff
+    baseline for both the incremental poll and the full sweep. `external_id`
+    is the source's own item identity (S3: the object key). `etag`+`size`
+    are the change signal compared against the live listing each sync
+    (last_modified is trusted less across S3-compatible providers' clocks,
+    so it isn't part of the diff, only informational). `doc_id` is null for
+    skipped/errored items and is nulled back out by the full sweep when the
+    backing Document is deleted. `status`: synced | skipped | error |
+    deleted. No document_acl rows are ever created for a connector-ingested
+    doc (#15 Tier C — S3 has no source ACLs to mirror): it's invisible to
+    non-admins until an admin grants access (#18), by design, not an
+    oversight."""
+
+    __tablename__ = "connector_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False
+    )
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    etag: Mapped[str | None] = mapped_column(String, nullable=True)
+    size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_modified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    doc_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("connector_id", "external_id", name="uq_connector_items_connector_id_external_id"),
+        Index("ix_connector_items_connector_id", "connector_id"),
     )
 
 

@@ -71,3 +71,41 @@ class EvalRunResponse(BaseModel):
 class EvalRunDetail(EvalRunResponse):
     created_at: datetime
     questions: list[dict]
+
+
+class ConnectorCreate(BaseModel):
+    type: Literal["s3"]
+    name: str = Field(min_length=1, max_length=255)
+    # endpoint_url/bucket/prefix/access key id/secret, plus an optional
+    # `collection` for where ingested docs land. Stored as plain JSONB v1
+    # (prorag/models.py's Connector docstring notes the env-ref-indirection
+    # upgrade path for the secret) — admin-only surface, so no redaction here.
+    config: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class ConnectorUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    config: dict | None = None
+    enabled: bool | None = None
+
+
+class ConnectorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    type: str
+    name: str
+    config: dict
+    enabled: bool
+    last_sync_at: datetime | None = None
+    last_full_sweep_at: datetime | None = None
+    created_at: datetime
+
+
+class SyncReport(BaseModel):
+    new: int
+    changed: int
+    deleted: int
+    skipped: int
+    errors: int
