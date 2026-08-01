@@ -2,12 +2,24 @@
 
 import logging
 
+from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import Text, and_, cast, func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prorag.models import Chunk, Document, TableRow
+from prorag.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _distance_expr(query_embedding: list[float]):
+    """Cosine distance, cast to match whichever index 0001_initial.py built:
+    above pgvector's 2000-dim hnsw cap it indexes embedding::halfvec(dim), so
+    the query must cast both sides the same way or the planner Seq Scans (#16)."""
+    if settings.embed_dim > 2000:
+        halfvec = HALFVEC(settings.embed_dim)
+        return cast(Chunk.embedding, halfvec).cosine_distance(cast(query_embedding, halfvec))
+    return Chunk.embedding.cosine_distance(query_embedding)
 
 
 async def vector_search(session: AsyncSession, query_embedding: list[float], k: int) -> list[dict]:
@@ -21,7 +33,7 @@ async def vector_search(session: AsyncSession, query_embedding: list[float], k: 
             Chunk.kind,
             Document.title,
             Document.filename,
-            Chunk.embedding.cosine_distance(query_embedding).label("distance"),
+            _distance_expr(query_embedding).label("distance"),
         )
         .join(Document, Chunk.doc_id == Document.id)
         .where(Document.status == "ready")

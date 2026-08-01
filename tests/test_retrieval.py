@@ -1,12 +1,14 @@
 """Pure-function tests for Phase 2 retrieval: RRF fusion, adaptive crop,
-planner JSON parsing fallback. No DB, no LLM, no network."""
+planner JSON parsing fallback. No DB, no LLM, no network — except the one
+EXPLAIN regression test at the bottom, which skips if the DB is unreachable."""
 
 import asyncio
+import random
 
 import pytest
 
 import prorag.retrieve.plan as plan_module
-from prorag.retrieve.arms import build_structured_query
+from prorag.retrieve.arms import _distance_expr, build_structured_query
 from prorag.retrieve.crop import crop_context, normalize_title
 from prorag.retrieve.fuse import rrf_fuse
 from prorag.retrieve.plan import _extract_json, _fallback, plan
@@ -247,3 +249,39 @@ async def test_plan_happy_path(monkeypatch):
     monkeypatch.setattr(plan_module, "plan_completion", good)
     result = await plan("anything")
     assert result == {"search_needed": True, "queries": ["primary", "alt"], "mode": "table"}
+
+
+# ---- vector_search ORDER BY must match the hnsw expression index (#16) ------
+
+
+async def test_vector_search_orders_by_the_expression_the_hnsw_index_was_built_on():
+    """0001_initial.py builds ix_chunks_embedding_hnsw on embedding::halfvec(dim)
+    when embed_dim > 2000. If the query orders by the raw column instead, the
+    expression never matches and the planner can't use the index at any corpus
+    size (confirmed below by forcing enable_seqscan=off, which the un-cast query
+    can't route around). Skips if the DB isn't reachable."""
+    from sqlalchemy import select, text
+
+    from prorag.db import SessionLocal, engine
+    from prorag.models import Chunk
+    from prorag.settings import settings
+
+    if settings.embed_dim <= 2000:
+        pytest.skip("embed_dim <= 2000 indexes the raw vector column, not halfvec")
+
+    try:
+        session = SessionLocal()
+        await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        pytest.skip(f"database unavailable: {exc}")
+
+    async with session:
+        query_embedding = [random.random() for _ in range(settings.embed_dim)]
+        stmt = select(Chunk.id, _distance_expr(query_embedding).label("distance")).order_by("distance").limit(5)
+        compiled = stmt.compile(dialect=engine.sync_engine.dialect, compile_kwargs={"literal_binds": True})
+
+        await session.execute(text("SET LOCAL enable_seqscan = off"))
+        rows = (await session.execute(text("EXPLAIN " + str(compiled)))).all()
+        plan_text = "\n".join(r[0] for r in rows)
+
+    assert "Index Scan using ix_chunks_embedding_hnsw" in plan_text, plan_text
