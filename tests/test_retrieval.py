@@ -160,7 +160,7 @@ def patched_retrieve(monkeypatch):
     """retrieve() with the network stubbed; each arm goes through session.execute."""
     import prorag.chat.router as cr
 
-    async def arm(session, _q, _k):
+    async def arm(session, _q, _k, **_kw):
         await session.execute()
         return []
 

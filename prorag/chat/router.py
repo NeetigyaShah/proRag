@@ -16,12 +16,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from prorag.auth import current_user
 from prorag.chat.citations import build_context_block, extract_cited_indices, normalize_citations, resolve_citations
 from prorag.chat.stream import HEARTBEAT_INTERVAL_SECONDS, TokenGuard, sse_comment, sse_event, sse_retry
 from prorag.cost import over_daily_cap, today_cost_usd, track_usage
 from prorag.db import get_session
 from prorag.llm import answer, answer_stream, embed_texts, estimate_tokens
-from prorag.models import Chat, Citation, Feedback, Message
+from prorag.models import Chat, Citation, Feedback, Message, User
 from prorag.retrieve.arms import keyword_search, structured_search, vector_search
 from prorag.retrieve.crop import crop_context
 from prorag.retrieve.fuse import rrf_fuse
@@ -43,9 +44,14 @@ SYSTEM_PROMPT = (
 )
 
 
-async def retrieve(session: AsyncSession, message: str) -> list[dict]:
+async def retrieve(session: AsyncSession, message: str, user: User | None = None) -> list[dict]:
     """Planner → embed both queries → gather(vector×2, fts×2[, structured×2])
-    → RRF → rerank top-N → adaptive crop. Shared by /chat and /search."""
+    → RRF → rerank top-N → adaptive crop. Shared by /chat and /search.
+
+    `user` (#18) is threaded into every arm so the ACL predicate applies
+    before LIMIT/rerank/crop ever see a row — None (auth disabled, legacy
+    unscoped key, or the eval runner's service-user — see eval/runner.py)
+    means unfiltered, same as today."""
     plan_result = await plan(message, session=session)
     queries = plan_result["queries"]  # [primary, alternative]
     wants_table = plan_result.get("mode") == "table"
@@ -61,10 +67,12 @@ async def retrieve(session: AsyncSession, message: str) -> list[dict]:
     # because one connection serializes them regardless. Real parallelism needs
     # a session per arm, which would take ~6 pool connections per request and
     # re-create the starvation problem the commit below fixes.
-    vector_lists = [await vector_search(session, e, settings.rerank_top_n) for e in embeddings]
-    fts_lists = [await keyword_search(session, q, settings.rerank_top_n) for q in queries]
+    vector_lists = [await vector_search(session, e, settings.rerank_top_n, user=user) for e in embeddings]
+    fts_lists = [await keyword_search(session, q, settings.rerank_top_n, user=user) for q in queries]
     structured_lists = (
-        [await structured_search(session, q, settings.rerank_top_n) for q in queries] if wants_table else []
+        [await structured_search(session, q, settings.rerank_top_n, user=user) for q in queries]
+        if wants_table
+        else []
     )
 
     ranked_lists = [*vector_lists, *fts_lists, *structured_lists]
@@ -152,10 +160,12 @@ async def check_daily_cap(session: AsyncSession) -> None:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)):
+async def chat(
+    req: ChatRequest, session: AsyncSession = Depends(get_session), user: User | None = Depends(current_user)
+):
     await check_daily_cap(session)
 
-    hits = await retrieve(session, req.message)
+    hits = await retrieve(session, req.message, user=user)
 
     user_prompt = build_prompt(req.message, hits)
     raw_answer = await answer(SYSTEM_PROMPT, user_prompt, session=session)
@@ -192,7 +202,9 @@ async def feedback(req: FeedbackRequest, session: AsyncSession = Depends(get_ses
 
 
 @router.post("/chat/stream")
-async def chat_stream(req: ChatRequest, session: AsyncSession = Depends(get_session)):
+async def chat_stream(
+    req: ChatRequest, session: AsyncSession = Depends(get_session), user: User | None = Depends(current_user)
+):
     """SSE per §5.2: sources[] before the first token (trust rule — every
     chunk the crop selected, not just what got cited), then token/citation
     events as they arrive, then meta + done."""
@@ -215,7 +227,7 @@ async def chat_stream(req: ChatRequest, session: AsyncSession = Depends(get_sess
             yield sse_event("done", {})
 
     async def _stream_frames():
-        hits = await retrieve(session, req.message)
+        hits = await retrieve(session, req.message, user=user)
         all_sources = [_to_source(i, h) for i, h in enumerate(hits, start=1)]
         yield sse_event("sources", [s.model_dump(mode="json") for s in all_sources])
 

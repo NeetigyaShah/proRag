@@ -5,8 +5,10 @@ through the LLM (§6)."""
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from prorag.auth import current_user
 from prorag.db import get_session
 from prorag.llm import embed_texts
+from prorag.models import User
 from prorag.retrieve.arms import keyword_search, structured_search, vector_search
 from prorag.retrieve.crop import crop_context
 from prorag.retrieve.fuse import rrf_fuse
@@ -18,7 +20,9 @@ router = APIRouter()
 
 
 @router.get("/search")
-async def search(q: str, k: int = 10, session: AsyncSession = Depends(get_session)):
+async def search(
+    q: str, k: int = 10, session: AsyncSession = Depends(get_session), user: User | None = Depends(current_user)
+):
     plan_result = await plan(q, session=session)
     queries = plan_result["queries"]
 
@@ -28,11 +32,13 @@ async def search(q: str, k: int = 10, session: AsyncSession = Depends(get_sessio
     # This endpoint is where that actually bit — it hands retrieve's arms a cold
     # session, so the gather raised InvalidRequestError rather than just
     # serializing.
-    vector_lists = [await vector_search(session, e, settings.rerank_top_n) for e in embeddings]
-    fts_lists = [await keyword_search(session, query, settings.rerank_top_n) for query in queries]
+    vector_lists = [await vector_search(session, e, settings.rerank_top_n, user=user) for e in embeddings]
+    fts_lists = [await keyword_search(session, query, settings.rerank_top_n, user=user) for query in queries]
     wants_table = plan_result.get("mode") == "table"
     structured_lists = (
-        [await structured_search(session, query, settings.rerank_top_n) for query in queries] if wants_table else []
+        [await structured_search(session, query, settings.rerank_top_n, user=user) for query in queries]
+        if wants_table
+        else []
     )
 
     ranked_lists = [*vector_lists, *fts_lists, *structured_lists]

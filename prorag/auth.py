@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prorag.db import get_session
-from prorag.models import ApiKey
+from prorag.models import ApiKey, User
 from prorag.settings import settings
 
 
@@ -49,3 +49,14 @@ async def require_api_key(request: Request, session: AsyncSession = Depends(get_
         raise HTTPException(403, "api key not scoped to this collection")
 
     return key
+
+
+async def current_user(
+    api_key: ApiKey | None = Depends(require_api_key), session: AsyncSession = Depends(get_session)
+) -> User | None:
+    """Resolves the bearer key's user_id to a User row (#18). None is the
+    same "super-principal, no filtering" meaning visibility_clause() gives
+    None for: auth disabled, or a legacy unscoped key (user_id IS NULL, #2)."""
+    if api_key is None or api_key.user_id is None:
+        return None
+    return (await session.execute(select(User).where(User.id == api_key.user_id))).scalar_one_or_none()

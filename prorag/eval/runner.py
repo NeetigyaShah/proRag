@@ -145,6 +145,8 @@ async def run_eval(session, golden_path: str | Path = DEFAULT_GOLDEN_PATH) -> di
     ragas_rows: list[dict] = []
 
     for entry in golden:
+        # user=None (default): the eval runner is #3's service-user, scored
+        # against the full corpus, not a real principal's filtered view (#18).
         hits = await retrieve(session, entry["question"])
         user_prompt = build_prompt(entry["question"], hits)
         raw_answer = await answer(SYSTEM_PROMPT, user_prompt, session=session)

@@ -1,4 +1,10 @@
-"""Retrieval arms: vector (Phase 1), keyword/BM25 (Phase 2), structured (Phase 3)."""
+"""Retrieval arms: vector (Phase 1), keyword/BM25 (Phase 2), structured (Phase 3).
+
+Each arm takes an optional `user` (#18): None keeps today's unfiltered
+behaviour (auth disabled / legacy unscoped key / admin), a real User adds the
+document_acl visibility predicate before LIMIT so ranking and downstream
+fusion/crop only ever see a legal candidate pool.
+"""
 
 import logging
 
@@ -6,7 +12,8 @@ from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import Text, and_, cast, func, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from prorag.models import Chunk, Document, TableRow
+from prorag.models import Chunk, Document, TableRow, User
+from prorag.retrieve.visibility import visibility_clause
 from prorag.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -22,7 +29,9 @@ def _distance_expr(query_embedding: list[float]):
     return Chunk.embedding.cosine_distance(query_embedding)
 
 
-async def vector_search(session: AsyncSession, query_embedding: list[float], k: int) -> list[dict]:
+async def vector_search(
+    session: AsyncSession, query_embedding: list[float], k: int, user: User | None = None
+) -> list[dict]:
     stmt = (
         select(
             Chunk.id,
@@ -40,6 +49,9 @@ async def vector_search(session: AsyncSession, query_embedding: list[float], k: 
         .order_by("distance")
         .limit(k)
     )
+    clause = visibility_clause(user)
+    if clause is not None:
+        stmt = stmt.where(clause)
     rows = (await session.execute(stmt)).all()
     return [
         {
@@ -56,6 +68,26 @@ async def vector_search(session: AsyncSession, query_embedding: list[float], k: 
     ]
 
 
+def _visibility_sql(user: User | None) -> tuple[str, dict]:
+    """Raw-SQL twin of visibility_clause(), for bm25_search's text() query.
+    Returns ("", {}) when no filtering applies (None/admin), else an
+    `AND EXISTS (...)` fragment with bound params only."""
+    if user is None or user.is_admin:
+        return "", {}
+    return (
+        """AND EXISTS (
+            SELECT 1 FROM document_acl a
+            WHERE a.doc_id = c.doc_id
+              AND (a.principal_type = 'public'
+                   OR (a.principal_type = 'user' AND a.principal_id = :vis_user_id)
+                   OR (a.principal_type = 'group' AND a.principal_id IN (
+                       SELECT group_id FROM user_groups WHERE user_id = :vis_user_id
+                   )))
+        )""",
+        {"vis_user_id": user.id},
+    )
+
+
 _BM25_AVAILABLE: bool | None = None  # probed once per process
 
 
@@ -67,21 +99,27 @@ async def _bm25_available(session: AsyncSession) -> bool:
     return _BM25_AVAILABLE
 
 
-async def bm25_search(session: AsyncSession, query: str, k: int) -> list[dict]:
+async def bm25_search(session: AsyncSession, query: str, k: int, user: User | None = None) -> list[dict]:
     """Real BM25 via pg_search (ParadeDB). `@@@` matches against the bm25 index
-    and paradedb.score() returns the BM25 score for the row."""
+    and paradedb.score() returns the BM25 score for the row.
+
+    This is raw SQL text, not an ORM select, so it can't reuse
+    visibility_clause() directly — instead of a second bound-param dialect,
+    the same EXISTS shape is inlined as a string fragment (params still
+    bound, never interpolated: injection-safe and index-friendly)."""
+    acl_sql, acl_params = _visibility_sql(user)
     stmt = text(
-        """
+        f"""
         SELECT c.id, c.doc_id, c.text, c.page_start, c.bbox, c.kind,
                d.title, d.filename, paradedb.score(c.id) AS score
         FROM chunks c
         JOIN documents d ON d.id = c.doc_id
-        WHERE c.text @@@ :q AND d.status = 'ready'
+        WHERE c.text @@@ :q AND d.status = 'ready' {acl_sql}
         ORDER BY score DESC
         LIMIT :k
         """
     )
-    rows = (await session.execute(stmt, {"q": query, "k": k})).all()
+    rows = (await session.execute(stmt, {"q": query, "k": k, **acl_params})).all()
     return [
         {
             "chunk_id": r.id,
@@ -97,18 +135,18 @@ async def bm25_search(session: AsyncSession, query: str, k: int) -> list[dict]:
     ]
 
 
-async def keyword_search(session: AsyncSession, query: str, k: int) -> list[dict]:
+async def keyword_search(session: AsyncSession, query: str, k: int, user: User | None = None) -> list[dict]:
     """Keyword arm: BM25 when pg_search is installed, tsvector ranking otherwise.
     Both feed the same RRF fusion, which ranks by position rather than raw score."""
     if await _bm25_available(session):
         try:
-            return await bm25_search(session, query, k)
+            return await bm25_search(session, query, k, user=user)
         except Exception:
             logger.warning("bm25 query failed; falling back to tsvector", exc_info=True)
-    return await fts_search(session, query, k)
+    return await fts_search(session, query, k, user=user)
 
 
-async def fts_search(session: AsyncSession, query: str, k: int) -> list[dict]:
+async def fts_search(session: AsyncSession, query: str, k: int, user: User | None = None) -> list[dict]:
     """websearch_to_tsquery + ts_rank_cd — fallback keyword arm (§4.2)."""
     tsq = func.websearch_to_tsquery("english", literal(query))
     rank = func.ts_rank_cd(Chunk.tsv, tsq).label("rank")
@@ -130,6 +168,9 @@ async def fts_search(session: AsyncSession, query: str, k: int) -> list[dict]:
         .order_by(rank.desc())
         .limit(k)
     )
+    clause = visibility_clause(user)
+    if clause is not None:
+        stmt = stmt.where(clause)
     rows = (await session.execute(stmt)).all()
     return [
         {
@@ -146,7 +187,9 @@ async def fts_search(session: AsyncSession, query: str, k: int) -> list[dict]:
     ]
 
 
-def build_structured_query(query: str, k: int, field_filters: dict[str, str] | None = None):
+def build_structured_query(
+    query: str, k: int, field_filters: dict[str, str] | None = None, user: User | None = None
+):
     """Build the JSONB row-search statement (§4.2): matches `query` against
     table_rows.data values (cast to text — no tsvector on JSONB rows), plus
     optional allow-listed field=value equality filters. Returns the owning
@@ -160,7 +203,7 @@ def build_structured_query(query: str, k: int, field_filters: dict[str, str] | N
         for field, value in field_filters.items():
             conditions.append(TableRow.data[field].astext == value)
 
-    return (
+    stmt = (
         select(
             Chunk.id.label("chunk_id"),
             Chunk.doc_id,
@@ -177,6 +220,10 @@ def build_structured_query(query: str, k: int, field_filters: dict[str, str] | N
         .distinct()
         .limit(k)
     )
+    clause = visibility_clause(user)
+    if clause is not None:
+        stmt = stmt.where(clause)
+    return stmt
 
 
 async def structured_search(
@@ -184,10 +231,11 @@ async def structured_search(
     query: str,
     k: int,
     field_filters: dict[str, str] | None = None,
+    user: User | None = None,
 ) -> list[dict]:
     """Structured arm (§4.2): only meaningful when the planner set
     `wants_table` or emitted a field filter mapping to a known column."""
-    stmt = build_structured_query(query, k, field_filters)
+    stmt = build_structured_query(query, k, field_filters, user=user)
     rows = (await session.execute(stmt)).all()
     return [
         {
