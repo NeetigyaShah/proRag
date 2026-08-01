@@ -192,14 +192,19 @@ async def check_bm25(probe=None, timeout: float = 5.0) -> tuple[str, bool, str]:
 # ---- orchestration ------------------------------------------------------------
 
 
-async def run_all() -> list[tuple[str, bool, str]]:
+async def run_all(*, llm_has_key: bool | None = None, embed_has_key: bool | None = None) -> list[tuple[str, bool, str]]:
+    """`llm_has_key`/`embed_has_key` let a caller force the no-network WARN
+    branch of check_llm/check_embed (tests/test_doctor.py's live-stack
+    integration test does this so a provider key set in .env for other
+    tests can't make it flake on a real network call) — default None keeps
+    the normal environment-autodetected behaviour for the `doctor` CLI."""
     return [
         check_settings(),
         await check_db(),
         await check_migrations(),
         check_blob_dir(),
-        await check_llm(),
-        await check_embed(),
+        await check_llm(has_key=llm_has_key),
+        await check_embed(has_key=embed_has_key),
         await check_rerank(),
         await check_bm25(),
     ]

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from prorag.auth import require_auth
 from prorag.auth_routes import router as auth_router
 from prorag.chat.router import router as chat_router
 from prorag.connectors.router import router as connectors_router
+from prorag.connectors.scheduler import scheduler_loop
 from prorag.db import engine, get_session
 from prorag.eval.router import router as eval_router
 from prorag.files.router import router as files_router
@@ -31,7 +33,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # #23: one background task drives every enabled connector's incremental
+    # poll / mandatory sweep (#15). Guarded by a setting so tests and
+    # single-shot scripts that import the app don't spin up a loop they
+    # never intended to run.
+    task = asyncio.create_task(scheduler_loop()) if settings.scheduler_enabled else None
     yield
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
     # Without this, a reload/SIGTERM leaves pooled connections for the DB to time
     # out on its own; dispose() closes them and lets the worker drain cleanly.
     await engine.dispose()

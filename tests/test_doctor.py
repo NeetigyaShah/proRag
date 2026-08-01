@@ -271,11 +271,12 @@ async def test_doctor_run_all_against_live_stack():
     finally:
         await engine.dispose()
 
-    try:
-        results = await doctor.run_all()
-        names = {name for name, _, _ in results}
-        assert names == {"settings", "db", "migrations", "blob_dir", "llm", "embed", "rerank", "bm25"}
-        fails = [(n, d) for n, ok, d in results if not ok]
-        assert not fails, f"doctor reported FAIL against the live stack: {fails}"
-    finally:
-        await engine.dispose()
+    # Force the no-network WARN branch for llm/embed regardless of what's in
+    # the environment (a provider key set in .env for other tests would
+    # otherwise make this specific check flake on a real network call);
+    # db/migrations/blob_dir/bm25 below still run against the live stack.
+    results = await doctor.run_all(llm_has_key=False, embed_has_key=False)
+    names = {name for name, _, _ in results}
+    assert names == {"settings", "db", "migrations", "blob_dir", "llm", "embed", "rerank", "bm25"}
+    fails = [(n, d) for n, ok, d in results if not ok]
+    assert not fails, f"doctor reported FAIL against the live stack: {fails}"

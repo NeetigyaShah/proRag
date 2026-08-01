@@ -13,7 +13,7 @@ import uuid
 import pytest
 from sqlalchemy import delete, text
 
-from prorag.db import SessionLocal, engine
+from prorag.db import SessionLocal
 from prorag.models import Chunk, Document, DocumentAcl, Group, User, UserGroup
 from prorag.retrieve.arms import keyword_search, vector_search
 from prorag.retrieve.visibility import visibility_clause, visible_doc_guard
@@ -71,94 +71,88 @@ async def test_document_acl_grant_revoke_group_grant_cycle():
     tag = uuid.uuid4().hex[:8]
     unique_word = f"zzvisacl{tag}"
 
-    try:
-        async with session:
-            user = User(email=f"{tag}@example.com")
-            admin = User(email=f"{tag}-admin@example.com", is_admin=True)
-            group = Group(name=f"group-{tag}")
-            session.add_all([user, admin, group])
-            await session.flush()
+    async with session:
+        user = User(email=f"{tag}@example.com")
+        admin = User(email=f"{tag}-admin@example.com", is_admin=True)
+        group = Group(name=f"group-{tag}")
+        session.add_all([user, admin, group])
+        await session.flush()
 
-            doc = Document(
-                sha256=tag,
-                filename="visibility.txt",
-                mime="text/plain",
-                blob_path="/tmp/visibility.txt",
-                status="ready",
-            )
-            session.add(doc)
-            await session.flush()
+        doc = Document(
+            sha256=tag,
+            filename="visibility.txt",
+            mime="text/plain",
+            blob_path="/tmp/visibility.txt",
+            status="ready",
+        )
+        session.add(doc)
+        await session.flush()
 
-            embedding = [random.random() for _ in range(settings.embed_dim)]
-            chunk = Chunk(
-                doc_id=doc.id,
-                ord=0,
-                kind="prose",
-                text=f"the {unique_word} marker sentence",
-                embed_text=f"the {unique_word} marker sentence",
-                token_count=5,
-                embedding=embedding,
-            )
-            session.add(chunk)
+        embedding = [random.random() for _ in range(settings.embed_dim)]
+        chunk = Chunk(
+            doc_id=doc.id,
+            ord=0,
+            kind="prose",
+            text=f"the {unique_word} marker sentence",
+            embed_text=f"the {unique_word} marker sentence",
+            token_count=5,
+            embedding=embedding,
+        )
+        session.add(chunk)
 
-            # This doc is new (not part of migration 0008's pre-existing-doc
-            # backfill), so it starts with zero ACL rows — add the same kind
-            # of 'public' grant that backfill gave pre-existing documents, to
-            # exercise that branch explicitly.
-            public_grant = DocumentAcl(doc_id=doc.id, principal_type="public", principal_id=None)
-            session.add(public_grant)
+        # This doc is new (not part of migration 0008's pre-existing-doc
+        # backfill), so it starts with zero ACL rows — add the same kind
+        # of 'public' grant that backfill gave pre-existing documents, to
+        # exercise that branch explicitly.
+        public_grant = DocumentAcl(doc_id=doc.id, principal_type="public", principal_id=None)
+        session.add(public_grant)
+        await session.commit()
+
+        try:
+            # public grant -> visible to a plain user, an admin, and user=None
+            assert await visible_doc_guard(session, user, doc.id) is True
+            assert await visible_doc_guard(session, admin, doc.id) is True
+            assert await visible_doc_guard(session, None, doc.id) is True
+
+            vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
+            assert doc.id in vec_hits
+            kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
+            assert doc.id in kw_hits
+
+            # revoke the public grant -> invisible to the plain user, still
+            # visible to admin and to user=None (super-principals bypass)
+            await session.execute(delete(DocumentAcl).where(DocumentAcl.id == public_grant.id))
             await session.commit()
 
-            try:
-                # public grant -> visible to a plain user, an admin, and user=None
-                assert await visible_doc_guard(session, user, doc.id) is True
-                assert await visible_doc_guard(session, admin, doc.id) is True
-                assert await visible_doc_guard(session, None, doc.id) is True
+            assert await visible_doc_guard(session, user, doc.id) is False
+            assert await visible_doc_guard(session, admin, doc.id) is True
+            assert await visible_doc_guard(session, None, doc.id) is True
 
-                vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
-                assert doc.id in vec_hits
-                kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
-                assert doc.id in kw_hits
+            vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
+            assert doc.id not in vec_hits
+            kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
+            assert doc.id not in kw_hits
 
-                # revoke the public grant -> invisible to the plain user, still
-                # visible to admin and to user=None (super-principals bypass)
-                await session.execute(delete(DocumentAcl).where(DocumentAcl.id == public_grant.id))
-                await session.commit()
+            admin_vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=admin)}
+            assert doc.id in admin_vec_hits
+            unscoped_vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=None)}
+            assert doc.id in unscoped_vec_hits
 
-                assert await visible_doc_guard(session, user, doc.id) is False
-                assert await visible_doc_guard(session, admin, doc.id) is True
-                assert await visible_doc_guard(session, None, doc.id) is True
+            # grant via group membership -> visible again to the plain user
+            session.add(UserGroup(user_id=user.id, group_id=group.id))
+            session.add(DocumentAcl(doc_id=doc.id, principal_type="group", principal_id=group.id))
+            await session.commit()
 
-                vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
-                assert doc.id not in vec_hits
-                kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
-                assert doc.id not in kw_hits
-
-                admin_vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=admin)}
-                assert doc.id in admin_vec_hits
-                unscoped_vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=None)}
-                assert doc.id in unscoped_vec_hits
-
-                # grant via group membership -> visible again to the plain user
-                session.add(UserGroup(user_id=user.id, group_id=group.id))
-                session.add(DocumentAcl(doc_id=doc.id, principal_type="group", principal_id=group.id))
-                await session.commit()
-
-                assert await visible_doc_guard(session, user, doc.id) is True
-                vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
-                assert doc.id in vec_hits
-                kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
-                assert doc.id in kw_hits
-            finally:
-                await session.execute(delete(DocumentAcl).where(DocumentAcl.doc_id == doc.id))
-                await session.execute(delete(UserGroup).where(UserGroup.user_id == user.id))
-                await session.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
-                await session.execute(delete(Document).where(Document.id == doc.id))
-                await session.execute(delete(Group).where(Group.id == group.id))
-                await session.execute(delete(User).where(User.id.in_([user.id, admin.id])))
-                await session.commit()
-    finally:
-        # Own event loop per test (pytest-asyncio); dispose so pooled
-        # connections don't stay bound to this loop and break the next DB
-        # test's checkout — same reasoning as test_identity_schema.py.
-        await engine.dispose()
+            assert await visible_doc_guard(session, user, doc.id) is True
+            vec_hits = {h["doc_id"] for h in await vector_search(session, embedding, 5, user=user)}
+            assert doc.id in vec_hits
+            kw_hits = {h["doc_id"] for h in await keyword_search(session, unique_word, 5, user=user)}
+            assert doc.id in kw_hits
+        finally:
+            await session.execute(delete(DocumentAcl).where(DocumentAcl.doc_id == doc.id))
+            await session.execute(delete(UserGroup).where(UserGroup.user_id == user.id))
+            await session.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
+            await session.execute(delete(Document).where(Document.id == doc.id))
+            await session.execute(delete(Group).where(Group.id == group.id))
+            await session.execute(delete(User).where(User.id.in_([user.id, admin.id])))
+            await session.commit()

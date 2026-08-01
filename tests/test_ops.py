@@ -18,7 +18,7 @@ from sqlalchemy import delete, text
 
 from prorag.auth import hash_key, new_api_key
 from prorag.cost import _utc_day_start, budget_decision, compute_cost, over_daily_cap, today_user_cost_usd, track_usage
-from prorag.db import SessionLocal, engine
+from prorag.db import SessionLocal
 from prorag.models import Usage, User
 from prorag.schemas import ChatRequest, FeedbackRequest, IngestResponse
 from prorag.settings import settings
@@ -184,50 +184,44 @@ async def test_today_user_cost_usd_only_sums_rows_since_utc_midnight():
     session = await _get_db_session()
     tag = uuid.uuid4().hex[:8]
 
-    try:
-        async with session:
-            user = User(email=f"{tag}@example.com")
-            session.add(user)
-            await session.flush()
+    async with session:
+        user = User(email=f"{tag}@example.com")
+        session.add(user)
+        await session.flush()
 
-            start = _utc_day_start()
-            just_inside = start + timedelta(seconds=1)
-            just_outside = start - timedelta(seconds=1)
+        start = _utc_day_start()
+        just_inside = start + timedelta(seconds=1)
+        just_outside = start - timedelta(seconds=1)
 
-            session.add_all(
-                [
-                    Usage(
-                        model="gpt-4o-mini",
-                        prompt_tokens=10,
-                        completion_tokens=5,
-                        cost_usd=1.23,
-                        user_id=user.id,
-                        created_at=just_inside,
-                    ),
-                    Usage(
-                        model="gpt-4o-mini",
-                        prompt_tokens=10,
-                        completion_tokens=5,
-                        cost_usd=9.99,
-                        user_id=user.id,
-                        created_at=just_outside,
-                    ),
-                ]
-            )
+        session.add_all(
+            [
+                Usage(
+                    model="gpt-4o-mini",
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    cost_usd=1.23,
+                    user_id=user.id,
+                    created_at=just_inside,
+                ),
+                Usage(
+                    model="gpt-4o-mini",
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    cost_usd=9.99,
+                    user_id=user.id,
+                    created_at=just_outside,
+                ),
+            ]
+        )
+        await session.commit()
+
+        try:
+            total = await today_user_cost_usd(session, user.id)
+            assert total == pytest.approx(1.23)
+        finally:
+            await session.execute(delete(Usage).where(Usage.user_id == user.id))
+            await session.execute(delete(User).where(User.id == user.id))
             await session.commit()
-
-            try:
-                total = await today_user_cost_usd(session, user.id)
-                assert total == pytest.approx(1.23)
-            finally:
-                await session.execute(delete(Usage).where(Usage.user_id == user.id))
-                await session.execute(delete(User).where(User.id == user.id))
-                await session.commit()
-    finally:
-        # pytest-asyncio gives each test its own event loop; pooled connections
-        # left open here would stay bound to this (now-closing) loop and blow up
-        # the next DB test's checkout. Dispose so the next test gets fresh ones.
-        await engine.dispose()
 
 
 # ---- request schema validation ------------------------------------------------

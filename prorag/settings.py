@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     readyz_timeout_seconds: float = 5.0
     fallback_price_per_1k_usd: float = 0.002  # used only when litellm has no price entry for a model
 
+    # #23: connector polling scheduler, on top of #22's sync engine and #15's
+    # cadence resolution (15 min incremental, mandatory nightly sweep).
+    scheduler_enabled: bool = True
+    connector_poll_seconds: int = 900
+    connector_sweep_hours: int = 24
+
     # ---- sanity checks (#20) ---------------------------------------------------
     # Deliberately narrow: obviously-nonsensical values that would otherwise fail
     # confusingly deep inside a request instead of at boot. Not exhaustive —

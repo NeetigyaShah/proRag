@@ -2,8 +2,8 @@
 
 Password hashing is pure and needs no DB. Everything else is DB-backed and
 follows tests/test_identity_schema.py's pattern: skip cleanly if Postgres is
-unreachable, clean up rows in a `finally`, dispose() the engine afterward so
-pooled connections don't stay bound to this test's (closing) event loop.
+unreachable, clean up rows in a `finally`. tests/conftest.py's autouse
+fixture disposes the engine after every test (#23).
 
 Endpoint tests dispatch through `httpx.AsyncClient` over `ASGITransport`
 rather than `fastapi.testclient.TestClient`: TestClient drives the ASGI app
@@ -37,7 +37,7 @@ from prorag.auth import (
     resolve_session_token,
     verify_password,
 )
-from prorag.db import SessionLocal, engine
+from prorag.db import SessionLocal
 from prorag.main import app
 from prorag.models import ApiKey, Group, Session, User, UserGroup
 from prorag.settings import settings
@@ -82,34 +82,31 @@ async def _get_session():
 async def test_session_create_resolve_expire_revoke():
     session = await _get_session()
     tag = uuid.uuid4().hex[:8]
-    try:
-        async with session:
-            user = User(email=f"{tag}@example.com")
-            session.add(user)
-            await session.flush()
+    async with session:
+        user = User(email=f"{tag}@example.com")
+        session.add(user)
+        await session.flush()
 
-            raw = await create_session(user.id, session)
-            try:
-                row = await resolve_session_token(raw, session)
-                assert row is not None
-                assert row.user_id == user.id
+        raw = await create_session(user.id, session)
+        try:
+            row = await resolve_session_token(raw, session)
+            assert row is not None
+            assert row.user_id == user.id
 
-                row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-                await session.commit()
-                assert await resolve_session_token(raw, session) is None
+            row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+            assert await resolve_session_token(raw, session) is None
 
-                row.expires_at = datetime.now(UTC) + timedelta(days=1)
-                row.revoked_at = datetime.now(UTC)
-                await session.commit()
-                assert await resolve_session_token(raw, session) is None
+            row.expires_at = datetime.now(UTC) + timedelta(days=1)
+            row.revoked_at = datetime.now(UTC)
+            await session.commit()
+            assert await resolve_session_token(raw, session) is None
 
-                assert await resolve_session_token("token-that-was-never-issued", session) is None
-            finally:
-                await session.execute(delete(Session).where(Session.user_id == user.id))
-                await session.execute(delete(User).where(User.id == user.id))
-                await session.commit()
-    finally:
-        await engine.dispose()
+            assert await resolve_session_token("token-that-was-never-issued", session) is None
+        finally:
+            await session.execute(delete(Session).where(Session.user_id == user.id))
+            await session.execute(delete(User).where(User.id == user.id))
+            await session.commit()
 
 
 # ---- current_user precedence: cookie > key > none -------------------------------
@@ -130,43 +127,40 @@ def _whoami_app():
 async def test_current_user_precedence_cookie_over_key_over_none():
     session = await _get_session()
     tag = uuid.uuid4().hex[:8]
-    try:
-        async with session:
-            cookie_user = User(email=f"{tag}-cookie@example.com")
-            key_user = User(email=f"{tag}-key@example.com")
-            session.add_all([cookie_user, key_user])
-            await session.flush()
+    async with session:
+        cookie_user = User(email=f"{tag}-cookie@example.com")
+        key_user = User(email=f"{tag}-key@example.com")
+        session.add_all([cookie_user, key_user])
+        await session.flush()
 
-            raw_session_token = await create_session(cookie_user.id, session)
-            raw_key = new_api_key()
-            session.add(ApiKey(key_hash=hash_key(raw_key), user_id=key_user.id))
+        raw_session_token = await create_session(cookie_user.id, session)
+        raw_key = new_api_key()
+        session.add(ApiKey(key_hash=hash_key(raw_key), user_id=key_user.id))
+        await session.commit()
+
+        try:
+            transport = ASGITransport(app=_whoami_app())
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/whoami")
+                assert resp.json() == {"email": None}
+
+                resp = await client.get("/whoami", headers={"Authorization": f"Bearer {raw_key}"})
+                assert resp.json() == {"email": key_user.email}
+
+                resp = await client.get(
+                    "/whoami",
+                    headers={"Authorization": f"Bearer {raw_key}"},
+                    cookies={SESSION_COOKIE_NAME: raw_session_token},
+                )
+                assert resp.json() == {"email": cookie_user.email}  # cookie wins when both present
+
+                resp = await client.get("/whoami", cookies={SESSION_COOKIE_NAME: raw_session_token})
+                assert resp.json() == {"email": cookie_user.email}
+        finally:
+            await session.execute(delete(ApiKey).where(ApiKey.user_id == key_user.id))
+            await session.execute(delete(Session).where(Session.user_id == cookie_user.id))
+            await session.execute(delete(User).where(User.id.in_([cookie_user.id, key_user.id])))
             await session.commit()
-
-            try:
-                transport = ASGITransport(app=_whoami_app())
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.get("/whoami")
-                    assert resp.json() == {"email": None}
-
-                    resp = await client.get("/whoami", headers={"Authorization": f"Bearer {raw_key}"})
-                    assert resp.json() == {"email": key_user.email}
-
-                    resp = await client.get(
-                        "/whoami",
-                        headers={"Authorization": f"Bearer {raw_key}"},
-                        cookies={SESSION_COOKIE_NAME: raw_session_token},
-                    )
-                    assert resp.json() == {"email": cookie_user.email}  # cookie wins when both present
-
-                    resp = await client.get("/whoami", cookies={SESSION_COOKIE_NAME: raw_session_token})
-                    assert resp.json() == {"email": cookie_user.email}
-            finally:
-                await session.execute(delete(ApiKey).where(ApiKey.user_id == key_user.id))
-                await session.execute(delete(Session).where(Session.user_id == cookie_user.id))
-                await session.execute(delete(User).where(User.id.in_([cookie_user.id, key_user.id])))
-                await session.commit()
-    finally:
-        await engine.dispose()
 
 
 # ---- require_auth guard: session OR key when enabled, wide open when not --------
@@ -187,56 +181,53 @@ def _protected_app():
 async def test_require_auth_session_or_key_and_auth_disabled_is_wide_open(monkeypatch):
     session = await _get_session()
     tag = uuid.uuid4().hex[:8]
-    try:
-        async with session:
-            user = User(email=f"{tag}-guard@example.com")
-            session.add(user)
-            await session.flush()
+    async with session:
+        user = User(email=f"{tag}-guard@example.com")
+        session.add(user)
+        await session.flush()
 
-            raw_session_token = await create_session(user.id, session)
-            raw_key = new_api_key()
-            session.add(ApiKey(key_hash=hash_key(raw_key), user_id=user.id))
-            await session.commit()
+        raw_session_token = await create_session(user.id, session)
+        raw_key = new_api_key()
+        session.add(ApiKey(key_hash=hash_key(raw_key), user_id=user.id))
+        await session.commit()
 
-            try:
-                transport = ASGITransport(app=_protected_app())
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    monkeypatch.setattr(settings, "auth_enabled", False)
-                    resp = await client.get("/protected")
-                    assert resp.status_code == 200
+        try:
+            transport = ASGITransport(app=_protected_app())
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                monkeypatch.setattr(settings, "auth_enabled", False)
+                resp = await client.get("/protected")
+                assert resp.status_code == 200
 
-                    monkeypatch.setattr(settings, "auth_enabled", True)
-                    resp = await client.get("/protected")
-                    assert resp.status_code == 401
+                monkeypatch.setattr(settings, "auth_enabled", True)
+                resp = await client.get("/protected")
+                assert resp.status_code == 401
 
-                    resp = await client.get("/protected", cookies={SESSION_COOKIE_NAME: raw_session_token})
-                    assert resp.status_code == 200
+                resp = await client.get("/protected", cookies={SESSION_COOKIE_NAME: raw_session_token})
+                assert resp.status_code == 200
 
-                    resp = await client.get("/protected", headers={"Authorization": f"Bearer {raw_key}"})
-                    assert resp.status_code == 200
+                resp = await client.get("/protected", headers={"Authorization": f"Bearer {raw_key}"})
+                assert resp.status_code == 200
 
-                    row = (await session.execute(select(Session).where(Session.user_id == user.id))).scalar_one()
-                    row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-                    await session.commit()
-
-                    # expired session cookie alone -> 401
-                    resp = await client.get("/protected", cookies={SESSION_COOKIE_NAME: raw_session_token})
-                    assert resp.status_code == 401
-
-                    # expired session cookie + a valid key -> falls through to the key, 200
-                    resp = await client.get(
-                        "/protected",
-                        cookies={SESSION_COOKIE_NAME: raw_session_token},
-                        headers={"Authorization": f"Bearer {raw_key}"},
-                    )
-                    assert resp.status_code == 200
-            finally:
-                await session.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
-                await session.execute(delete(Session).where(Session.user_id == user.id))
-                await session.execute(delete(User).where(User.id == user.id))
+                row = (await session.execute(select(Session).where(Session.user_id == user.id))).scalar_one()
+                row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
                 await session.commit()
-    finally:
-        await engine.dispose()
+
+                # expired session cookie alone -> 401
+                resp = await client.get("/protected", cookies={SESSION_COOKIE_NAME: raw_session_token})
+                assert resp.status_code == 401
+
+                # expired session cookie + a valid key -> falls through to the key, 200
+                resp = await client.get(
+                    "/protected",
+                    cookies={SESSION_COOKIE_NAME: raw_session_token},
+                    headers={"Authorization": f"Bearer {raw_key}"},
+                )
+                assert resp.status_code == 200
+        finally:
+            await session.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
+            await session.execute(delete(Session).where(Session.user_id == user.id))
+            await session.execute(delete(User).where(User.id == user.id))
+            await session.commit()
 
 
 # ---- /auth/login and /auth/logout (DB, real app) --------------------------------
@@ -246,37 +237,34 @@ async def test_login_rejects_wrong_password_and_succeeds_then_logout_revokes():
     session = await _get_session()
     tag = uuid.uuid4().hex[:8]
     email = f"{tag}@example.com"
-    try:
-        async with session:
-            user = User(email=email, password_hash=hash_password("s3cret-pass"))
-            session.add(user)
+    async with session:
+        user = User(email=email, password_hash=hash_password("s3cret-pass"))
+        session.add(user)
+        await session.commit()
+
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post("/auth/login", json={"email": email, "password": "wrong"})
+                assert resp.status_code == 401
+
+                resp = await client.post("/auth/login", json={"email": email, "password": "s3cret-pass"})
+                assert resp.status_code == 200
+                raw_cookie = resp.cookies.get(SESSION_COOKIE_NAME)
+                assert raw_cookie
+
+                row = (await session.execute(select(Session).where(Session.user_id == user.id))).scalar_one()
+                assert row.revoked_at is None
+
+                resp = await client.post("/auth/logout", cookies={SESSION_COOKIE_NAME: raw_cookie})
+                assert resp.status_code == 200
+
+                await session.refresh(row)
+                assert row.revoked_at is not None
+        finally:
+            await session.execute(delete(Session).where(Session.user_id == user.id))
+            await session.execute(delete(User).where(User.id == user.id))
             await session.commit()
-
-            try:
-                transport = ASGITransport(app=app)
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.post("/auth/login", json={"email": email, "password": "wrong"})
-                    assert resp.status_code == 401
-
-                    resp = await client.post("/auth/login", json={"email": email, "password": "s3cret-pass"})
-                    assert resp.status_code == 200
-                    raw_cookie = resp.cookies.get(SESSION_COOKIE_NAME)
-                    assert raw_cookie
-
-                    row = (await session.execute(select(Session).where(Session.user_id == user.id))).scalar_one()
-                    assert row.revoked_at is None
-
-                    resp = await client.post("/auth/logout", cookies={SESSION_COOKIE_NAME: raw_cookie})
-                    assert resp.status_code == 200
-
-                    await session.refresh(row)
-                    assert row.revoked_at is not None
-            finally:
-                await session.execute(delete(Session).where(Session.user_id == user.id))
-                await session.execute(delete(User).where(User.id == user.id))
-                await session.commit()
-    finally:
-        await engine.dispose()
 
 
 async def test_login_rejects_a_user_with_no_local_password():
@@ -285,22 +273,19 @@ async def test_login_rejects_a_user_with_no_local_password():
     session = await _get_session()
     tag = uuid.uuid4().hex[:8]
     email = f"{tag}-oidc-only@example.com"
-    try:
-        async with session:
-            user = User(email=email, external_subject=f"sub-{tag}")
-            session.add(user)
-            await session.commit()
+    async with session:
+        user = User(email=email, external_subject=f"sub-{tag}")
+        session.add(user)
+        await session.commit()
 
-            try:
-                transport = ASGITransport(app=app)
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.post("/auth/login", json={"email": email, "password": "anything"})
-                    assert resp.status_code == 401
-            finally:
-                await session.execute(delete(User).where(User.id == user.id))
-                await session.commit()
-    finally:
-        await engine.dispose()
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post("/auth/login", json={"email": email, "password": "anything"})
+                assert resp.status_code == 401
+        finally:
+            await session.execute(delete(User).where(User.id == user.id))
+            await session.commit()
 
 
 # ---- OIDC: 404 when unconfigured, callback upserts + seeds groups --------------
@@ -333,65 +318,62 @@ async def test_oidc_callback_upserts_user_and_replaces_idp_group_membership(monk
 
     monkeypatch.setattr(auth_routes, "_exchange_code_for_claims", fake_exchange)
 
-    try:
-        async with session:
-            try:
-                transport = ASGITransport(app=app)
-                state_cookie = "state-value:nonce-value"
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.get(
-                        "/auth/oidc/callback",
-                        params={"code": "auth-code-1", "state": "state-value"},
-                        cookies={auth_routes.OIDC_STATE_COOKIE: state_cookie},
-                        follow_redirects=False,
+    async with session:
+        try:
+            transport = ASGITransport(app=app)
+            state_cookie = "state-value:nonce-value"
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get(
+                    "/auth/oidc/callback",
+                    params={"code": "auth-code-1", "state": "state-value"},
+                    cookies={auth_routes.OIDC_STATE_COOKIE: state_cookie},
+                    follow_redirects=False,
+                )
+            assert resp.status_code == 302
+            assert resp.headers["location"] == "/"
+            assert resp.cookies.get(SESSION_COOKIE_NAME)
+
+            user = (await session.execute(select(User).where(User.external_subject == sub))).scalar_one()
+            assert user.email == email
+
+            idp_memberships = (
+                await session.execute(
+                    select(UserGroup).join(Group, Group.id == UserGroup.group_id).where(
+                        UserGroup.user_id == user.id, Group.source == "idp"
                     )
-                assert resp.status_code == 302
-                assert resp.headers["location"] == "/"
-                assert resp.cookies.get(SESSION_COOKIE_NAME)
+                )
+            ).scalars().all()
+            assert len(idp_memberships) == 2
 
-                user = (await session.execute(select(User).where(User.external_subject == sub))).scalar_one()
-                assert user.email == email
+            # second login drops group_b -> idp-sourced membership is replaced, not merged
+            claims["groups"] = [group_a]
 
-                idp_memberships = (
-                    await session.execute(
-                        select(UserGroup).join(Group, Group.id == UserGroup.group_id).where(
-                            UserGroup.user_id == user.id, Group.source == "idp"
-                        )
+            async def fake_exchange_2(code, redirect_uri, nonce):
+                return claims
+
+            monkeypatch.setattr(auth_routes, "_exchange_code_for_claims", fake_exchange_2)
+
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp2 = await client.get(
+                    "/auth/oidc/callback",
+                    params={"code": "auth-code-2", "state": "state-value"},
+                    cookies={auth_routes.OIDC_STATE_COOKIE: state_cookie},
+                    follow_redirects=False,
+                )
+            assert resp2.status_code == 302
+
+            idp_memberships_after = (
+                await session.execute(
+                    select(UserGroup).join(Group, Group.id == UserGroup.group_id).where(
+                        UserGroup.user_id == user.id, Group.source == "idp"
                     )
-                ).scalars().all()
-                assert len(idp_memberships) == 2
-
-                # second login drops group_b -> idp-sourced membership is replaced, not merged
-                claims["groups"] = [group_a]
-
-                async def fake_exchange_2(code, redirect_uri, nonce):
-                    return claims
-
-                monkeypatch.setattr(auth_routes, "_exchange_code_for_claims", fake_exchange_2)
-
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp2 = await client.get(
-                        "/auth/oidc/callback",
-                        params={"code": "auth-code-2", "state": "state-value"},
-                        cookies={auth_routes.OIDC_STATE_COOKIE: state_cookie},
-                        follow_redirects=False,
-                    )
-                assert resp2.status_code == 302
-
-                idp_memberships_after = (
-                    await session.execute(
-                        select(UserGroup).join(Group, Group.id == UserGroup.group_id).where(
-                            UserGroup.user_id == user.id, Group.source == "idp"
-                        )
-                    )
-                ).scalars().all()
-                assert len(idp_memberships_after) == 1
-            finally:
-                await session.execute(delete(User).where(User.external_subject == sub))  # cascades sessions/user_groups
-                await session.execute(delete(Group).where(Group.source == "idp", Group.external_id.in_([group_a, group_b])))
-                await session.commit()
-    finally:
-        await engine.dispose()
+                )
+            ).scalars().all()
+            assert len(idp_memberships_after) == 1
+        finally:
+            await session.execute(delete(User).where(User.external_subject == sub))  # cascades sessions/user_groups
+            await session.execute(delete(Group).where(Group.source == "idp", Group.external_id.in_([group_a, group_b])))
+            await session.commit()
 
 
 async def test_oidc_callback_rejects_state_mismatch(monkeypatch):

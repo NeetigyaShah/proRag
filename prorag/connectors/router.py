@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prorag.auth import current_user
+from prorag.connectors.scheduler import get_lock
 from prorag.connectors.sync import full_sweep, sync_incremental
 from prorag.db import get_session
 from prorag.models import Connector, User
@@ -81,11 +82,19 @@ async def delete_connector(connector_id: uuid.UUID, session: AsyncSession = Depe
 @router.post("/{connector_id}/sync", response_model=SyncReport, dependencies=[Depends(require_admin)])
 async def sync_connector(connector_id: uuid.UUID, full: bool = False, session: AsyncSession = Depends(get_session)):
     """`?full=true` runs the mandatory reconciliation sweep (deletion
-    propagation, #15) instead of the incremental poll. Manual trigger v1 —
-    the background scheduler is the next ticket (#22's scope note)."""
+    propagation, #15) instead of the incremental poll.
+
+    Shares its per-connector asyncio.Lock with the background scheduler
+    (#23, connectors/scheduler.py) — a sync already running for this
+    connector (manual or scheduled) means this call rejects instead of
+    piling a second run onto the same connector."""
     row = await _get_or_404(session, connector_id)
-    try:
-        report = await (full_sweep(row, session) if full else sync_incremental(row, session))
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    lock = get_lock(connector_id)
+    if lock.locked():
+        raise HTTPException(409, "sync already running")
+    async with lock:
+        try:
+            report = await (full_sweep(row, session) if full else sync_incremental(row, session))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     return report

@@ -275,18 +275,13 @@ async def test_vector_search_orders_by_the_expression_the_hnsw_index_was_built_o
     except Exception as exc:
         pytest.skip(f"database unavailable: {exc}")
 
-    try:
-        async with session:
-            query_embedding = [random.random() for _ in range(settings.embed_dim)]
-            stmt = select(Chunk.id, _distance_expr(query_embedding).label("distance")).order_by("distance").limit(5)
-            compiled = stmt.compile(dialect=engine.sync_engine.dialect, compile_kwargs={"literal_binds": True})
+    async with session:
+        query_embedding = [random.random() for _ in range(settings.embed_dim)]
+        stmt = select(Chunk.id, _distance_expr(query_embedding).label("distance")).order_by("distance").limit(5)
+        compiled = stmt.compile(dialect=engine.sync_engine.dialect, compile_kwargs={"literal_binds": True})
 
-            await session.execute(text("SET LOCAL enable_seqscan = off"))
-            rows = (await session.execute(text("EXPLAIN " + str(compiled)))).all()
-        plan_text = "\n".join(r[0] for r in rows)
-    finally:
-        # Own event loop per test (pytest-asyncio); dispose so pooled connections
-        # don't stay bound to this loop and break the next DB test's checkout.
-        await engine.dispose()
+        await session.execute(text("SET LOCAL enable_seqscan = off"))
+        rows = (await session.execute(text("EXPLAIN " + str(compiled)))).all()
+    plan_text = "\n".join(r[0] for r in rows)
 
     assert "Index Scan using ix_chunks_embedding_hnsw" in plan_text, plan_text

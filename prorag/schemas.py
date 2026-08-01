@@ -100,6 +100,7 @@ class ConnectorOut(BaseModel):
     enabled: bool
     last_sync_at: datetime | None = None
     last_full_sweep_at: datetime | None = None
+    last_error: str | None = None
     created_at: datetime
 
 

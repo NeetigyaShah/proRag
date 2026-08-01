@@ -358,6 +358,10 @@ class Connector(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_full_sweep_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # #23: the scheduler has no HTTP caller to surface an exception to, so a
+    # failed scheduled run records it here instead; cleared on the next
+    # success. Manual syncs (POST /connectors/{id}/sync) raise instead.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
