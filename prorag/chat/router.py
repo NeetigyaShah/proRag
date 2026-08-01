@@ -225,6 +225,7 @@ async def chat_stream(req: ChatRequest, session: AsyncSession = Depends(get_sess
         cited_seen: list[int] = []
 
         source_stream = answer_stream(SYSTEM_PROMPT, user_prompt).__aiter__()
+        usage = None
         while True:
             try:
                 kind, delta = await asyncio.wait_for(source_stream.__anext__(), timeout=HEARTBEAT_INTERVAL_SECONDS)
@@ -233,6 +234,10 @@ async def chat_stream(req: ChatRequest, session: AsyncSession = Depends(get_sess
                 continue
             except StopAsyncIteration:
                 break
+
+            if kind == "usage":
+                usage = delta
+                continue
 
             if kind == "thinking":
                 # Reasoning deltas are dropped (user preference: answer only).
@@ -259,10 +264,13 @@ async def chat_stream(req: ChatRequest, session: AsyncSession = Depends(get_sess
 
         normalized = normalize_citations(raw_answer)
 
-        # Usage isn't available mid-stream (§llm.py) — estimate tokens from the
-        # actual prompt/completion text once the stream is done (§5.4).
-        prompt_tokens = estimate_tokens(settings.answer_model, SYSTEM_PROMPT + user_prompt)
-        completion_tokens = estimate_tokens(settings.answer_model, raw_answer)
+        # Real usage from litellm's final stream chunk (§llm.py); estimate_tokens()
+        # is only a fallback for providers that don't return one (§5.4).
+        if usage:
+            prompt_tokens, completion_tokens = usage["prompt_tokens"], usage["completion_tokens"]
+        else:
+            prompt_tokens = estimate_tokens(settings.answer_model, SYSTEM_PROMPT + user_prompt)
+            completion_tokens = estimate_tokens(settings.answer_model, raw_answer)
         track_usage(session, settings.answer_model, prompt_tokens, completion_tokens)
 
         cited_sources = [s for s in all_sources if s.n in cited_seen]

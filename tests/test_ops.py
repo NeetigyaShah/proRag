@@ -11,8 +11,10 @@ import litellm
 import pytest
 from pydantic import ValidationError
 
+from datetime import datetime, timedelta, timezone
+
 from prorag.auth import hash_key, new_api_key
-from prorag.cost import compute_cost, over_daily_cap, track_usage
+from prorag.cost import _utc_day_start, compute_cost, over_daily_cap, track_usage
 from prorag.models import Usage
 from prorag.schemas import ChatRequest, FeedbackRequest, IngestResponse
 from prorag.settings import settings
@@ -96,6 +98,20 @@ def test_track_usage_adds_usage_row_with_computed_cost(monkeypatch):
     assert row.completion_tokens == 50
     assert row.cost_usd == 0.01
     assert row.message_id == "msg-1"
+
+
+# ---- UTC cost window (issue #13: date.today() used the server's local date) --
+
+
+def test_utc_day_start_is_midnight_utc_not_local():
+    # 11pm on Jan 1 at UTC-5 is already Jan 2 in UTC — date.today() (local)
+    # would wrongly anchor the window to Jan 1.
+    now = datetime(2024, 1, 1, 23, 0, tzinfo=timezone(timedelta(hours=-5)))
+    assert _utc_day_start(now) == datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+
+def test_utc_day_start_is_tz_aware():
+    assert _utc_day_start().tzinfo is not None
 
 
 # ---- daily cap decision logic -------------------------------------------------

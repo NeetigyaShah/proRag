@@ -127,9 +127,10 @@ async def answer(system: str, user: str, session=None, message_id=None) -> str:
 
 async def answer_stream(system: str, user: str):
     """LiteLLM streaming variant of answer() — yields text deltas as they
-    arrive, for /chat/stream (§5.2, Phase 4). Usage isn't reliably available
-    mid-stream, so the caller tracks cost itself via estimate_tokens() after
-    the stream completes (see chat/router.py)."""
+    arrive, for /chat/stream (§5.2, Phase 4). stream_options include_usage
+    makes the final chunk carry real token counts, yielded as ("usage", ...);
+    that chunk's `choices` list is typically empty, so it's guarded rather
+    than indexed."""
     response = await litellm.acompletion(
         model=settings.answer_model,
         messages=[
@@ -137,10 +138,18 @@ async def answer_stream(system: str, user: str):
             {"role": "user", "content": user},
         ],
         stream=True,
+        stream_options={"include_usage": True},
         **_reasoning_kwargs(settings.answer_model),
     )
     async for chunk in response:
-        delta_obj = chunk["choices"][0]["delta"]
+        usage = chunk.get("usage")
+        if usage:
+            prompt_tokens, completion_tokens = _usage_tokens(chunk)
+            yield ("usage", {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens})
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta_obj = choices[0]["delta"]
         # Reasoning models (e.g. Ling via OpenRouter) stream their thinking as
         # `reasoning_content`/`reasoning` deltas before the answer content.
         reasoning = (

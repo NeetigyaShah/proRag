@@ -4,7 +4,7 @@ first; a flat per-1k-token price fallback when the model has no litellm price en
 (local ONNX embeddings, custom LiteLLM proxy names).
 """
 
-from datetime import date, datetime
+from datetime import datetime, timezone
 
 import litellm
 from sqlalchemy import func, select
@@ -49,9 +49,18 @@ def track_usage(
     return cost
 
 
+def _utc_day_start(now: datetime | None = None) -> datetime:
+    """UTC midnight for `now` (defaults to current UTC time), tz-aware — split
+    out so the window logic is testable without a DB (§8 Phase 5 tests)."""
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 async def today_cost_usd(session: AsyncSession) -> float:
-    """Sum of usage.cost_usd since UTC midnight — a cheap query at this scale (§5.4)."""
-    start = datetime.combine(date.today(), datetime.min.time())
+    """Sum of usage.cost_usd since UTC midnight — a cheap query at this scale (§5.4).
+    Usage.created_at is a tz-aware timestamptz (func.now()), so the comparison
+    stays tz-aware end to end rather than mixing naive local time in."""
+    start = _utc_day_start()
     total = (
         await session.execute(select(func.coalesce(func.sum(Usage.cost_usd), 0.0)).where(Usage.created_at >= start))
     ).scalar_one()
