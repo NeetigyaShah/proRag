@@ -1,6 +1,8 @@
 """SQLAlchemy models. Phase 1: documents + chunks. Phase 3 adds tables/table_rows
 and structured-document columns on chunks (bbox, heading_path, title_norm, table_id).
 Phase 4 adds chats/messages/citations. Phase 5 adds api_keys, usage, feedback.
+0008 adds identity + ACL (users, groups, user_groups, document_acl) per the
+decisions in #2 and #15 — schema only, no enforcement (that's #18).
 
 # ponytail: a `jobs` table (§7, SKIP LOCKED queue) still isn't implemented —
 # ingestion stays inline; Phase 5's retry loop lives in ingest/router.py
@@ -11,7 +13,20 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ARRAY, FetchedValue, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    ARRAY,
+    Boolean,
+    CheckConstraint,
+    FetchedValue,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -152,9 +167,84 @@ class Citation(Base):
     __table_args__ = (Index("ix_citations_message_id", "message_id"),)
 
 
+class User(Base):
+    """A principal (#2): the deployment is the tenant, the user is who budgets
+    and grants attach to. `external_subject` is the IdP `sub`, null for local
+    accounts. Group membership is never read from token claims per-request —
+    `user_groups` rows are the truth (#2)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    external_subject: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    disabled_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class Group(Base):
+    """A grantable principal (#2, #15) — `source` distinguishes locally-created
+    groups from ones synced from an IdP; `external_id` is only set for the
+    latter. Unique on (source, external_id) is a partial index (migration
+    0008) since local groups have no external_id to collide on."""
+
+    __tablename__ = "groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="local")  # local | idp
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (CheckConstraint("source IN ('local', 'idp')", name="ck_groups_source"),)
+
+
+class UserGroup(Base):
+    """Membership row — the truth queries read (#2); IdP claims may seed this
+    at login but are never trusted per-request."""
+
+    __tablename__ = "user_groups"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+
+    __table_args__ = (PrimaryKeyConstraint("user_id", "group_id"),)
+
+
+class DocumentAcl(Base):
+    """Mirrors the *source's* stated principals (#15) — not materialised
+    grants. `principal_id` is null only for `principal_type='public'`. Default
+    deny: no row for a document means no access, except the one-time
+    compatibility backfill migration 0008 performs for pre-existing documents
+    (see that migration's docstring)."""
+
+    __tablename__ = "document_acl"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    principal_type: Mapped[str] = mapped_column(String, nullable=False)  # user | group | public
+    principal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="local")
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("principal_type IN ('user', 'group', 'public')", name="ck_document_acl_principal_type"),
+        Index("ix_document_acl_doc_id", "doc_id"),
+        Index("ix_document_acl_principal", "principal_type", "principal_id"),
+    )
+
+
 class ApiKey(Base):
     """Bearer API keys (§6, §8 Phase 5). Only the hash is stored; the raw key
-    is printed once by scripts/create_api_key.py and never persisted."""
+    is printed once by scripts/create_api_key.py and never persisted.
+    `user_id` is nullable — null is the legacy unscoped super-key (#2)."""
 
     __tablename__ = "api_keys"
 
@@ -162,12 +252,15 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
     collection: Mapped[str | None] = mapped_column(String, nullable=True)  # null = unscoped
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class Usage(Base):
     """One row per planner/answer/embedding LLM call (§5.4). `message_id` is
-    nullable because planner + embedding calls happen before a message exists."""
+    nullable because planner + embedding calls happen before a message exists.
+    `user_id` is nullable (pre-#2 rows, machine calls) and indexed together
+    with `created_at` for the per-user daily budget query (#2)."""
 
     __tablename__ = "usage"
 
@@ -177,9 +270,13 @@ class Usage(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
-    __table_args__ = (Index("ix_usage_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_usage_created_at", "created_at"),
+        Index("ix_usage_user_id_created_at", "user_id", "created_at"),
+    )
 
 
 class Feedback(Base):
