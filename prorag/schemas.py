@@ -110,3 +110,48 @@ class SyncReport(BaseModel):
     deleted: int
     skipped: int
     errors: int
+
+
+class AccessRuleCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    nl_query: str = Field(min_length=1, max_length=2000)
+    group_id: uuid.UUID
+
+
+class AccessRuleUpdate(BaseModel):
+    # v1 ships confirm-once (admin/router.py refuses this once state is
+    # 'confirmed') — see AccessRule's docstring in models.py.
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    nl_query: str | None = Field(default=None, min_length=1, max_length=2000)
+    group_id: uuid.UUID | None = None
+
+
+class AccessRuleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    nl_query: str
+    group_id: uuid.UUID
+    state: Literal["draft", "confirmed"]
+    created_at: datetime
+    confirmed_at: datetime | None = None
+
+
+class GroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class GroupOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    source: str
+    external_id: str | None = None
+
+
+class UserPatch(BaseModel):
+    is_admin: bool | None = None
+    disabled_at: datetime | None = None
+    daily_cap_usd_override: float | None = None

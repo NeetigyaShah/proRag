@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     connector_poll_seconds: int = 900
     connector_sweep_hours: int = 24
 
+    # #4, #24: access-rule preview/confirm/auto-admission. Cosine similarity
+    # a chunk's embedding must clear (against the rule's nl_query embedding)
+    # for its document to count as a rule match. Tunable: raise it to make
+    # rules stricter (fewer false-positive grants), lower it to widen recall.
+    rule_similarity_floor: float = 0.35
+
     # ---- sanity checks (#20) ---------------------------------------------------
     # Deliberately narrow: obviously-nonsensical values that would otherwise fail
     # confusingly deep inside a request instead of at boot. Not exhaustive —

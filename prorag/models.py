@@ -5,6 +5,7 @@ Phase 4 adds chats/messages/citations. Phase 5 adds api_keys, usage, feedback.
 decisions in #2 and #15 — schema only, no enforcement (that's #18). 0011 adds
 connectors + connector_items (#22): the first sync-engine source (S3), Tier C
 per #15 (no ACLs to mirror, so no document_acl rows — admin-only by default).
+0013 adds access_rules (#4, #24): the admin dashboard API's rule model.
 
 # ponytail: a `jobs` table (§7, SKIP LOCKED queue) still isn't implemented —
 # ingestion stays inline; Phase 5's retry loop lives in ingest/router.py
@@ -247,6 +248,32 @@ class DocumentAcl(Base):
         Index("ix_document_acl_doc_id", "doc_id"),
         Index("ix_document_acl_principal", "principal_type", "principal_id"),
     )
+
+
+class AccessRule(Base):
+    """A natural-language access rule (#4, #24): the admin confirms the
+    *rule*, not each document. `query_embedding` is NULL until confirm —
+    preview (POST /admin/rules/{id}/preview, admin/router.py) embeds
+    `nl_query` ad hoc without storing it; confirm is what persists the
+    embedding, so future documents can be auto-admitted (ingest/core.py) at
+    zero extra LLM cost. Deleting a rule revokes its grants immediately —
+    those grants are tagged `document_acl.source = 'rule:{id}'`, so the
+    delete is one scoped DELETE, not a diff. v1 has no pending-diff re-run on
+    edit (#10's out-of-scope note): editing is only allowed while `state`
+    is still 'draft'."""
+
+    __tablename__ = "access_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    nl_query: Mapped[str] = mapped_column(Text, nullable=False)
+    group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("groups.id"), nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="draft")
+    query_embedding = mapped_column(Vector(settings.embed_dim), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (CheckConstraint("state IN ('draft', 'confirmed')", name="ck_access_rules_state"),)
 
 
 class Session(Base):

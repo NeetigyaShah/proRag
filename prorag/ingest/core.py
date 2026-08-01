@@ -18,7 +18,7 @@ import logging
 import uuid
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,7 +36,7 @@ from prorag.ingest.parse import (
 from prorag.ingest.store import blob_path_for, delete_blob, sha256_hex, write_blob
 from prorag.ingest.tables import build_table_artifacts
 from prorag.llm import embed_texts_batched
-from prorag.models import Chunk, Document, Table, TableRow
+from prorag.models import AccessRule, Chunk, Document, Table, TableRow
 from prorag.retrieve.crop import normalize_title
 from prorag.schemas import IngestResponse
 from prorag.settings import settings
@@ -128,6 +128,68 @@ async def _store_table(
         for a in artifacts
     ]
     return table, chunks, [a.text for a in artifacts]
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+async def _apply_confirmed_rules(session: AsyncSession, doc: Document, chunks: list[Chunk]) -> None:
+    """Auto-admission (#4, #24): check a just-ingested document against every
+    confirmed rule's *stored* embedding — one cosine comparison per
+    (rule, chunk) pair against embeddings the ingest pipeline already
+    computed, so this costs zero extra LLM calls. Matches
+    admin/router.py's _rule_candidates() floor semantics but in Python
+    instead of SQL, since these embeddings aren't committed yet.
+
+    A rule-check failure must never fail the ingest that triggered it — log
+    and move on.
+
+    # ponytail: O(confirmed_rules * chunks) in Python, fine at this scale (a
+    # handful of rules, a few hundred chunks per doc). Upgrade path if either
+    # grows: batch this as one SQL query per rule against the just-flushed
+    # chunk rows (same GROUP BY/HAVING shape as _rule_candidates), like a
+    # single-document version of confirm's candidate search.
+    """
+    try:
+        rules = (
+            (
+                await session.execute(
+                    select(AccessRule).where(AccessRule.state == "confirmed", AccessRule.query_embedding.is_not(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rules:
+            return
+        for rule in rules:
+            matched = any(
+                _cosine_similarity(c.embedding, rule.query_embedding) >= settings.rule_similarity_floor for c in chunks
+            )
+            if not matched:
+                continue
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO document_acl (doc_id, principal_type, principal_id, source)
+                    SELECT :doc_id, 'group', :group_id, CAST(:src AS text)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM document_acl
+                        WHERE doc_id = :doc_id AND principal_type = 'group'
+                          AND principal_id = :group_id AND source = CAST(:src AS text)
+                    )
+                    """
+                ),
+                {"doc_id": doc.id, "group_id": rule.group_id, "src": f"rule:{rule.id}"},
+            )
+    except Exception:
+        logger.exception("auto-admission rule check failed for doc %s; continuing without it", doc.id)
 
 
 async def ingest_bytes(
@@ -272,6 +334,7 @@ async def ingest_bytes(
 
         session.add_all(new_chunks)  # one flush instead of per-row round trips
         doc.status = "ready"
+        await _apply_confirmed_rules(session, doc, new_chunks)
         await session.commit()
     except Exception as exc:
         # Any failure after the document row exists: roll back the partial work,

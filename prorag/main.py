@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from prorag.admin.router import router as admin_router
 from prorag.auth import require_auth
 from prorag.auth_routes import router as auth_router
 from prorag.chat.router import router as chat_router
@@ -63,6 +64,7 @@ app.include_router(files_router, dependencies=_auth)
 app.include_router(search_router, dependencies=_auth)
 app.include_router(eval_router, dependencies=_auth)
 app.include_router(connectors_router, dependencies=_auth)
+app.include_router(admin_router, dependencies=_auth)
 
 # Login must be reachable unauthenticated — no _auth dependency here.
 app.include_router(auth_router)
