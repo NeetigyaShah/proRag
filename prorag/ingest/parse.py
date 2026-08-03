@@ -30,6 +30,11 @@ DOCLING_AVAILABLE = importlib.util.find_spec("docling") is not None
 _SIGNATURES: list[tuple[bytes, str]] = [
     (b"%PDF-", "application/pdf"),
     (b"PK\x03\x04", "zip"),  # docx/pptx/xlsx are all zip containers
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+    (b"RIFF", "image/webp"),  # RIFF....WEBP — the WEBP tag sits at offset 8
 ]
 
 _OOXML_MARKERS: list[tuple[bytes, str]] = [
@@ -93,6 +98,10 @@ DOCLING_MIMES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+    "image/png",
+    "image/jpeg",
+    "image/tiff",
+    "image/webp",
 }
 
 STRUCTURED_MIMES = {
@@ -118,8 +127,13 @@ def _make_docling_converter():
     - picture/table image generation off (nothing here consumes those)
     """
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import AcceleratorOptions, ThreadedPdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.pipeline_options import (
+        AcceleratorOptions,
+        PdfPipelineOptions,
+        RapidOcrOptions,
+        ThreadedPdfPipelineOptions,
+    )
+    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
     from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 
     opts = ThreadedPdfPipelineOptions(
@@ -134,12 +148,45 @@ def _make_docling_converter():
     opts.generate_picture_images = False
     opts.generate_table_images = False
 
+    # Raster uploads (scanned pages, photos) and image-only PDFs have no text
+    # layer — OCR is mandatory. Kept as a SECOND lazy converter: the default
+    # PDF pipeline keeps do_ocr=False (memory; measured OOM history above).
+    img_opts = PdfPipelineOptions()
+    img_opts.do_ocr = True
+    img_opts.ocr_options = RapidOcrOptions()
+    img_opts.images_scale = 1.0
+
     return DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(
                 pipeline_cls=ThreadedStandardPdfPipeline,
                 pipeline_options=opts,
-            )
+            ),
+            InputFormat.IMAGE: ImageFormatOption(pipeline_options=img_opts),
+        }
+    )
+
+
+def _make_docling_ocr_converter():
+    """Converter for image-only documents: PDFs with no text layer and raster
+    uploads. Same memory tuning as _make_docling_converter, but with OCR
+    enabled (rapidocr)."""
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import (
+        PdfPipelineOptions,
+        RapidOcrOptions,
+    )
+    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
+
+    opts = PdfPipelineOptions()
+    opts.do_ocr = True
+    opts.ocr_options = RapidOcrOptions()
+    opts.images_scale = 1.0
+
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=opts),
+            InputFormat.IMAGE: ImageFormatOption(pipeline_options=opts),
         }
     )
 
@@ -160,6 +207,37 @@ def _get_docling_converter():
     return _docling_converter
 
 
+_docling_ocr_converter = None
+
+
+def _get_docling_ocr_converter():
+    """Second lazy singleton: OCR-enabled pipeline for image-only documents
+    (raster uploads, scanned PDFs). Loaded only when such a file arrives —
+    digital PDFs keep the memory-tuned no-OCR converter."""
+    global _docling_ocr_converter
+    if _docling_ocr_converter is None:
+        if not DOCLING_AVAILABLE:
+            raise ImportError("docling not installed; PyMuPDF fallback is active")
+        _docling_ocr_converter = _make_docling_ocr_converter()
+    return _docling_ocr_converter
+
+
+def _pdf_has_text_layer(data: bytes) -> bool:
+    """Cheap text-layer probe for PDFs: PyMuPDF's get_text per page. A scan
+    renders glyphs but has no text layer — those must go through the OCR
+    pipeline, while digital PDFs keep the faster no-OCR path."""
+    try:
+        import fitz
+
+        doc = fitz.open(stream=data, filetype="pdf")
+        try:
+            return any(len(page.get_text().strip()) > 0 for page in doc)
+        finally:
+            doc.close()
+    except Exception:
+        return True  # probe failed — assume digital, let the parse decide
+
+
 def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument | None:
     """Parse via Docling, splitting the element stream into prose vs Table
     elements (§3.1/§3.2). Returns None if Docling isn't installed or parsing
@@ -173,6 +251,12 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
             f.write(data)
             tmp_path = f.name
         converter = _get_docling_converter()
+        if mime == "application/pdf" and not _pdf_has_text_layer(data):
+            # Scanned PDF: no text layer — OCR it instead of returning zero
+            # text and failing the ingest (or silently producing nothing).
+            converter = _get_docling_ocr_converter()
+        elif mime.startswith("image/"):
+            converter = _get_docling_ocr_converter()
         result = converter.convert(tmp_path)
         dl_doc = result.document
 
@@ -273,4 +357,8 @@ def guess_mime(filename: str) -> str:
         return "text/csv"
     if lower.endswith(".md"):
         return "text/markdown"
+    if lower.endswith((".png", ".jpg", ".jpeg", ".tiff", ".tif", ".webp")):
+        return "image/png" if lower.endswith(".png") else (
+            "image/jpeg" if lower.endswith((".jpg", ".jpeg")) else (
+                "image/tiff" if lower.endswith((".tiff", ".tif")) else "image/webp"))
     return "text/plain"

@@ -118,7 +118,7 @@ export function TopBar({
           type="file"
           // Mirrors ALLOWED_SUFFIXES in prorag/ingest/router.py — .txt/.md/.tsv
           // were accepted by the backend but hidden by the file picker.
-          accept=".pdf,.txt,.md,.docx,.pptx,.csv,.xlsx,.tsv"
+          accept=".pdf,.txt,.md,.docx,.pptx,.csv,.xlsx,.tsv,.png,.jpg,.jpeg,.tiff,.tif,.webp"
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];

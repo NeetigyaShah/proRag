@@ -244,6 +244,12 @@ async def ingest_bytes(
                 page_count = docling_doc.page_count
                 used_structured_chunking = True
             else:
+                if mime.startswith("image/"):
+                    # OCR is the only parse path for raster uploads; a failed
+                    # docling parse must not fall through to the raw-text path
+                    # (that would ingest binary garbage as text).
+                    delete_blob(path)
+                    raise HTTPException(422, "could not extract text from this image (OCR unavailable?)")
                 # Visible degradation: no tables and no bbox means citations can
                 # open the right page but can't highlight the passage.
                 logger.info("docling unavailable/failed for %s; using pymupdf text path", filename)

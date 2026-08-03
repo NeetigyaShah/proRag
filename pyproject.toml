@@ -25,6 +25,8 @@ dependencies = [
     # must work out of the box; parse.py still degrades to PyMuPDF if the
     # import ever fails.
     "docling>=2.117",
+    # OCR engine for scanned PDFs and image uploads (rapidocr, via docling).
+    "onnxruntime>=1.17",
 ]
 
 [project.optional-dependencies]

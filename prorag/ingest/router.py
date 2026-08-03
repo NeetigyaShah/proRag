@@ -30,7 +30,10 @@ from prorag.settings import settings
 
 router = APIRouter()
 
-ALLOWED_SUFFIXES = (".pdf", ".txt", ".md", ".docx", ".pptx", ".csv", ".xlsx", ".tsv")
+ALLOWED_SUFFIXES = (
+    ".pdf", ".txt", ".md", ".docx", ".pptx", ".csv", ".xlsx", ".tsv",
+    ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".webp",
+)
 _COLLECTION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
