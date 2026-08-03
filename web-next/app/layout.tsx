@@ -25,7 +25,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${inter.variable} ${newsreader.variable} h-full dark`}>
+    <html lang="en" className={`${inter.variable} ${newsreader.variable} h-full light`}>
       <body className="h-full min-h-full flex flex-col antialiased">{children}</body>
     </html>
   );

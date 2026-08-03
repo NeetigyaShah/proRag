@@ -1,27 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  --background: #09090b;
-  --foreground: #f4f4f5;
-  --card: #111113;
-  --card-foreground: #f4f4f5;
-  --popover: #111113;
-  --popover-foreground: #f4f4f5;
-  --primary: #f4f4f5;
-  --primary-foreground: #09090b;
-  --secondary: #18181b;
-  --secondary-foreground: #f4f4f5;
-  --muted: #18181b;
-  --muted-foreground: #a1a1aa;
-  --accent: #27272a;
-  --accent-foreground: #f4f4f5;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #0f172a;
+  --primary-foreground: #fafafa;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f1f5f9;
+  --accent-foreground: #0f172a;
   --destructive: #ef4444;
-  --destructive-foreground: #fafafa;
-  --border: #26262b;
-  --input: #26262b;
-  --ring: #ffb380;
-  --amber: #ffb380;
-  --amber-foreground: #7a2f00;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #d97706;
+  --amber: #d97706;
+  --amber-foreground: #78350f;
+  --amber-light: #fef3c7;
   --radius: 0.75rem;
 }
 
@@ -47,6 +48,7 @@
   --color-ring: var(--ring);
   --color-amber: var(--amber);
   --color-amber-foreground: var(--amber-foreground);
+  --color-amber-light: var(--amber-light);
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 4px);
   --radius-sm: calc(var(--radius) - 6px);
@@ -59,7 +61,7 @@
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
@@ -93,10 +95,231 @@ body {
   background: transparent;
 }
 
-#pdf-highlight {
+/* pdf.js text layer over the rendered page — pen-highlighter style: matched
+   spans get a translucent amber tint over the text itself (no boxes). */
+.textLayer {
   position: absolute;
-  border: 2px solid var(--amber);
-  background: color-mix(in srgb, var(--amber) 25%, transparent);
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+}
+
+.textLayer span {
+  position: absolute;
+  white-space: pre;
+  transform-origin: 0% 0%;
+  /* Glyphs live on the canvas underneath; the layer only supplies selection
+     and the highlight tint. */
+  color: transparent;
+}
+
+.textLayer span.pdf-hl {
+  background: color-mix(in srgb, var(--amber) 45%, transparent);
   border-radius: 2px;
-  pointer-events: none;
+}
+
+/* Mobile PDF viewer slide-over sheet (page.tsx) — desktop keeps the viewer
+   static via md:animate-none. */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* --- RAG FX animations (rag-monster-modal.tsx, thinking-radar-drawer.tsx,
+   speed-control.tsx) ---------------------------------------------------------
+   Light, professional motion system (Open Design redesign, v2): neutral
+   slate + the app's amber accent only, no neon/arcade remnants. All motion
+   is CSS-keyframe driven and paced by one custom property, --speed-factor,
+   which the modal sets to 1 / playback-speed; every animation resolves its
+   duration through it, so the shared speed control retimes everything. */
+
+/* Mascot: the friendly chomp (page every 0.5s at 1x = 2 pages/sec) */
+@keyframes rag-chomp {
+  0%, 100% { transform: scaleY(1); }
+  38% { transform: scaleY(0.5); }
+  68% { transform: scaleY(1.05); }
+}
+.rag-chomp {
+  animation: rag-chomp calc(0.5s * var(--speed-factor, 1)) ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: 50% 24%;
+}
+
+/* Mascot: gentle gulp as a page is swallowed */
+@keyframes rag-gulp {
+  0%, 100% { transform: translateY(0) scale(1); }
+  36% { transform: translateY(3px) scale(0.984); }
+}
+.rag-gulp {
+  animation: rag-gulp calc(0.5s * var(--speed-factor, 1)) ease-in-out infinite;
+}
+
+/* Mascot: idle breathing when paused */
+@keyframes rag-breath {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(2px); }
+}
+.rag-breath { animation: rag-breath 2.8s ease-in-out infinite; }
+
+/* Mascot: occasional blink while crunching */
+@keyframes rag-blink {
+  0%, 91%, 100% { transform: scaleY(1); }
+  94% { transform: scaleY(0.08); }
+}
+.rag-blink {
+  animation: rag-blink 4.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+/* Mascot: one satisfied blink on completion, then happy arc eyes */
+@keyframes rag-happy-blink {
+  0%, 100% { transform: scaleY(1); }
+  40% { transform: scaleY(0.12); }
+}
+.rag-happy-blink {
+  animation: rag-happy-blink 0.9s ease-in-out 0.35s 1;
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+/* Conveyor: a page card gliding into the mouth. --page-duration is set by
+   the component (0.5s * speed-factor); the card lands under the mascot,
+   where the head occludes it. */
+@keyframes rag-slide {
+  0% { transform: translateX(0) rotate(0deg); opacity: 0; }
+  12% { opacity: 1; }
+  68% { opacity: 1; }
+  100% { transform: translateX(var(--slide-x, 220px)) rotate(-2deg); opacity: 0; }
+}
+.rag-page {
+  animation: rag-slide var(--page-duration, 0.5s) cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Trigger sparkle: soft, barely-there pulse */
+@keyframes rag-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.9); }
+}
+.rag-sparkle { animation: rag-pulse 1.9s ease-in-out infinite; }
+
+/* Pipeline active node: pulsing amber outline */
+@keyframes rag-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.16); }
+  55% { box-shadow: 0 0 0 5px rgba(217, 119, 6, 0.05); }
+}
+.rag-ring {
+  animation: rag-ring calc(1.6s * var(--speed-factor, 1)) ease-in-out infinite;
+}
+
+/* Processing: indeterminate streaming shimmer (LLM-style) */
+@keyframes rag-shimmer {
+  0% { left: -45%; }
+  100% { left: 100%; }
+}
+.rag-shimmer {
+  animation: rag-shimmer calc(1.5s * var(--speed-factor, 1)) linear infinite;
+}
+
+/* Processing: compact dot row on the drawer trigger */
+@keyframes rag-dots {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30% { transform: translateY(-2px); opacity: 1; }
+}
+.rag-dot { animation: rag-dots 1.25s ease-in-out infinite; }
+.rag-dot:nth-child(2) { animation-delay: 0.14s; }
+.rag-dot:nth-child(3) { animation-delay: 0.28s; }
+
+/* --- Scan-bed ingestion stage (fully SVG — Open Design concept "Scan Bed")
+   The whole animation lives inside one <svg>: a document sheet on a scan bed,
+   an amber light bar sweeping top-to-bottom per page, an amber tint filling
+   the scanned region behind the bar, a checkmark pop on completion, and a
+   stacking tray that accumulates slips. All motion is CSS-keyframed on SVG
+   groups (transform-box: fill-box) — compositor-friendly, no DOM churn.
+   Pacing derives from one var, --cycle, set inline to fxDuration(speed,
+   1000) ms; the sweep distance comes from --sweep-y (set inline to the
+   sheet's inner height). */
+
+.scan-stage {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 78%, rgba(217, 119, 6, 0.08), transparent 60%),
+    linear-gradient(to bottom, #fbfdff 0%, #f1f5f9 100%);
+}
+.scan-stage::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: radial-gradient(circle, rgba(148, 163, 184, 0.16) 1px, transparent 1px);
+  background-size: 20px 20px; opacity: 0.45;
+}
+.scan-stage svg { display: block; }
+
+/* Light bar sweep — translateY down the sheet */
+.scan-bar {
+  transform-box: fill-box;
+  animation: scan-sweep var(--cycle, 1s) cubic-bezier(0.33, 0, 0.67, 1) forwards;
+  will-change: transform;
+}
+@keyframes scan-sweep {
+  0%   { transform: translateY(0); }
+  100% { transform: translateY(var(--sweep-y, 114px)); }
+}
+
+/* Amber tint filling the scanned region behind the bar (grows from the top) */
+.scan-tint {
+  transform-box: fill-box;
+  transform-origin: 50% 0%;
+  animation: scan-tint var(--cycle, 1s) cubic-bezier(0.33, 0, 0.67, 1) forwards;
+}
+@keyframes scan-tint {
+  0%   { transform: scaleY(0); }
+  100% { transform: scaleY(1); }
+}
+
+/* Checkmark pops as the sweep completes */
+.scan-check {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  opacity: 0;
+  animation: scan-check var(--cycle, 1s) ease-out forwards;
+}
+@keyframes scan-check {
+  0%, 90% { opacity: 0; transform: scale(0.4); }
+  100%    { opacity: 1; transform: scale(1); }
+}
+
+/* Done: tray glows amber */
+.scan-stage.state-done .scan-tray-glow {
+  animation: scan-tray-pulse 1.6s ease-in-out infinite;
+}
+@keyframes scan-tray-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Cancelled: sweep freezes mid-sheet, tray dims */
+.scan-stage.state-cancelled .scan-bar {
+  animation-play-state: paused;
+}
+.scan-stage.state-cancelled .scan-tray,
+.scan-stage.state-cancelled .scan-tint {
+  opacity: 0.55;
+}
+.scan-stage.state-cancelled .scan-tint {
+  animation-play-state: paused;
+}
+
+/* Stacked tray slips slide in per page */
+.scan-slip {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: scan-slip-in 0.25s ease-out forwards;
+}
+@keyframes scan-slip-in {
+  0%   { opacity: 0; transform: scaleY(0.2); }
+  100% { opacity: 1; transform: scaleY(1); }
 }
