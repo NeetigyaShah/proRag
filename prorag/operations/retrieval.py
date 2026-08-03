@@ -110,7 +110,6 @@ async def retrieve(session: AsyncSession, message: str, user: User | None = None
         min_docs=settings.crop_min_docs,
         max_docs=settings.crop_max_docs,
         max_chunks_per_doc=settings.crop_max_chunks_per_doc,
-        score_gap=settings.crop_score_gap,
         score_floor=settings.crop_score_floor,
         token_budget=settings.crop_token_budget,
     )

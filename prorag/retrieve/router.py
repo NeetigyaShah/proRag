@@ -43,7 +43,6 @@ async def search(
         reranked,
         min_docs=settings.crop_min_docs,
         max_docs=settings.crop_max_docs,
-        score_gap=settings.crop_score_gap,
         score_floor=settings.crop_score_floor,
         token_budget=settings.crop_token_budget,
     )

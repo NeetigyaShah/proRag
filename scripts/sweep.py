@@ -25,7 +25,7 @@ from prorag.settings import settings
 # generate_combinations() is a plain cartesian product over whatever's here.
 SWEEP_GRID: dict[str, list] = {
     "rerank_top_n": [20, 40],
-    "crop_score_gap": [0.10, 0.15, 0.20],
+    "crop_score_floor": [0.01, 0.02, 0.05],
     "crop_max_docs": [8, 12],
     "structured_weight": [1.0, 1.2],
 }

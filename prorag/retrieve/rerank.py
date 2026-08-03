@@ -43,11 +43,34 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reranker")
 RERANK_URL = "https://openrouter.ai/api/v1/rerank"
 
 
+def _flat_guard(hits: list[dict], input_scores: list[float]) -> list[dict] | None:
+    """Flatness guard: if the reranker's five best chunks (by score) are all
+    within settings.rerank_flat_spread, its re-ordering is noise — the fused
+    (input) order is the order of record. The real score MULTISET is still
+    attached, but assigned in descending order down the fused order:
+    crop_context and the UI both sort by score (stably), so the scores must
+    encode the fused order or the sort would silently undo it. Measured on
+    the top-5 BY SCORE: that is the band the crop and the answer actually
+    use, and an outlier (e.g. a junk doc scoring 0.010) must not inflate the
+    spread and mask a flat top. Returns None when the scores discriminate
+    (keep the rerank order)."""
+    top = sorted(input_scores, reverse=True)[:5]
+    if len(top) >= 2 and (max(top) - min(top)) < settings.rerank_flat_spread:
+        logger.info(
+            "rerank scores flat (top-5 spread %.4f) — keeping fused order",
+            max(top) - min(top),
+        )
+        ordered = sorted(input_scores, reverse=True)
+        return [{**h, "score": ordered[i]} for i, h in enumerate(hits)]
+    return None
+
+
 async def _rerank_api(query: str, hits: list[dict]) -> list[dict]:
     """When called: by rerank() when settings.rerank_backend == "api".
     What: one hosted cross-encoder call scoring all pairs; re-sorts by
-    relevance_score desc (scores already 0..1). Returns: hits unchanged on
-    any failure — no key, HTTP error, timeout, or malformed body."""
+    relevance_score desc (scores already 0..1), unless the flatness guard
+    fires. Returns: hits unchanged on any failure — no key, HTTP error,
+    timeout, or malformed body."""
     api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         logger.warning("OPENROUTER_API_KEY is not set — rerank API unavailable")
@@ -65,14 +88,17 @@ async def _rerank_api(query: str, hits: list[dict]) -> list[dict]:
             )
             resp.raise_for_status()
             results = (resp.json().get("results") or [])
-        scored = [
-            {**hits[r["index"]], "score": float(r["relevance_score"])}
-            for r in results
-            if 0 <= r.get("index", -1) < len(hits)
-        ]
-        if not scored:
+        valid = [r for r in results if 0 <= r.get("index", -1) < len(hits)]
+        if not valid:
             logger.warning("rerank API returned no results; degrading")
             return hits
+        input_scores = [0.0] * len(hits)
+        for r in valid:
+            input_scores[r["index"]] = float(r["relevance_score"])
+        guarded = _flat_guard(hits, input_scores)
+        if guarded is not None:
+            return guarded
+        scored = [{**hits[r["index"]], "score": float(r["relevance_score"])} for r in valid]
         # The API returns best-first, but the defensive sort keeps the
         # contract even if a provider ever ignores ordering.
         scored.sort(key=lambda h: h["score"], reverse=True)
@@ -113,8 +139,11 @@ def _rerank_sync(query: str, hits: list[dict]) -> list[dict]:
     if model is None or not hits:
         return hits
     pairs = [(query, h["text"]) for h in hits]
-    scores = model.predict(pairs)
-    reranked = [{**h, "score": float(s)} for h, s in zip(hits, scores, strict=True)]
+    scores = [float(s) for s in model.predict(pairs)]
+    guarded = _flat_guard(hits, scores)
+    if guarded is not None:
+        return guarded
+    reranked = [{**h, "score": s} for h, s in zip(hits, scores, strict=True)]
     reranked.sort(key=lambda h: h["score"], reverse=True)
     return reranked
 

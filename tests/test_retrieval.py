@@ -53,13 +53,13 @@ def test_rrf_fuse_empty():
 # ---- adaptive crop ---------------------------------------------------------
 
 
-def test_crop_dynamic_floor_drops_low_scorers():
+def test_crop_floor_drops_low_scorers():
     hits = [
         _hit(1, score=0.9, title="A"),
         _hit(2, score=0.85, title="B"),
-        _hit(3, score=0.2, title="C"),  # below top_score - gap(0.15) = 0.75
+        _hit(3, score=0.2, title="C"),  # below the 0.3 absolute floor
     ]
-    cropped = crop_context(hits, min_docs=1, max_docs=12, score_gap=0.15)
+    cropped = crop_context(hits, min_docs=1, max_docs=12, score_floor=0.3)
     ids = [h["chunk_id"] for h in cropped]
     assert 3 not in ids
     assert ids == [1, 2]
@@ -67,13 +67,13 @@ def test_crop_dynamic_floor_drops_low_scorers():
 
 def test_crop_enforces_min_docs_even_below_floor():
     hits = [_hit(i, score=1.0 - i * 0.3, title=f"T{i}") for i in range(5)]
-    cropped = crop_context(hits, min_docs=3, max_docs=12, score_gap=0.05)
+    cropped = crop_context(hits, min_docs=3, max_docs=12, score_floor=0.5)
     assert len(cropped) >= 3
 
 
 def test_crop_enforces_max_docs():
     hits = [_hit(i, score=0.9, title=f"T{i}") for i in range(20)]
-    cropped = crop_context(hits, min_docs=3, max_docs=12, score_gap=0.15)
+    cropped = crop_context(hits, min_docs=3, max_docs=12, score_floor=0.02)
     assert len(cropped) <= 12
 
 
@@ -83,7 +83,7 @@ def test_crop_revision_aware_dedup_prefers_newer_doc_date():
         _hit(2, score=0.85, title="Safety Manual Rev 3", doc_date="2023-01-01"),
         _hit(3, score=0.5, title="Unrelated Doc"),
     ]
-    cropped = crop_context(hits, min_docs=1, max_docs=12, score_gap=0.5)
+    cropped = crop_context(hits, min_docs=1, max_docs=12, score_floor=0.4)
     ids = [h["chunk_id"] for h in cropped]
     assert 1 not in ids  # superseded by the newer revision
     assert 2 in ids
@@ -99,7 +99,7 @@ def test_crop_keeps_multiple_chunks_of_one_document():
         _hit(4, score=0.7, title="Resume.pdf", doc_id="doc-a"),
         _hit(5, score=0.6, title="Other.pdf", doc_id="doc-b"),
     ]
-    cropped = crop_context(hits, min_docs=1, max_docs=12, score_gap=0.5, max_chunks_per_doc=3)
+    cropped = crop_context(hits, min_docs=1, max_docs=12, score_floor=0.4, max_chunks_per_doc=3)
     ids = [h["chunk_id"] for h in cropped]
     assert ids[:3] == [1, 2, 3]  # top-3 chunks of the winning document
     assert 4 not in ids  # beyond the per-document cap
@@ -119,7 +119,7 @@ def test_crop_empty_input():
 def test_crop_token_budget_stops_after_min_docs():
     big_text = "word " * 5000
     hits = [_hit(i, score=0.9 - i * 0.01, title=f"T{i}", text=big_text) for i in range(6)]
-    cropped = crop_context(hits, min_docs=2, max_docs=12, score_gap=1.0, token_budget=6000)
+    cropped = crop_context(hits, min_docs=2, max_docs=12, score_floor=0.02, token_budget=6000)
     assert len(cropped) == 2  # min_docs always kept, budget stops further growth
 
 

@@ -74,12 +74,20 @@ class Settings(BaseSettings):
     # When the API call fails (network, provider outage), degrade to the
     # local cross-encoder instead of silently skipping the rerank.
     rerank_api_fallback_to_local: bool = True
+    # Flatness guard: when the reranker's top scores sit within this spread,
+    # its re-ordering is noise — rerank() keeps the pre-rerank fused order
+    # instead (scores still attached; downstream sorts are stable). Measured
+    # on the resume-skills failure: cohere scored the top-6 chunks within
+    # 0.005 and demoted the right chunk (#2 fused -> #5 reranked).
+    rerank_flat_spread: float = 0.03
     rerank_top_n: int = 40  # fused hits sent into the reranker
     crop_min_docs: int = 3
     crop_max_docs: int = 12
     crop_max_chunks_per_doc: int = 3  # sections of one PDF all answerable
-    crop_score_gap: float = 0.15  # dynamic floor = max(top_score - gap, crop_score_floor)
-    crop_score_floor: float = 0.0
+    # Floor-only crop (ADR 0002): everything below an absolute relevance bar
+    # is cut; no dynamic top-score gap — a single erratic rerank spike must
+    # never starve the rest of the context.
+    crop_score_floor: float = 0.02
     crop_token_budget: int = 6000
 
     # Phase 3: structured retrieval arm

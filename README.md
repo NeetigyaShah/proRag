@@ -163,7 +163,7 @@ Each run scores every question two ways, computes an aggregate, and persists bot
   `"ragas": "skipped (ragas not installed)"` and a one-line warning is logged — no error.
 
 **Sweep**: `scripts/sweep.py` runs the golden set once per combination of
-`rerank_top_n` / `crop_score_gap` / `crop_max_docs` / `structured_weight` (the grid in
+`rerank_top_n` / `crop_score_floor` / `crop_max_docs` / `structured_weight` (the grid in
 `SWEEP_GRID`), overriding `settings` in-process — no code edits per run — and prints a
 ranked table. Chunk `target_tokens` is *not* swept: it's an ingest-time decision
 (re-chunking means re-ingesting), not a per-request knob.

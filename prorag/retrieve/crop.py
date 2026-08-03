@@ -2,8 +2,8 @@
 
 crop_context(): sort by rerank score, dedupe revisions of the same document
 (same title_norm, keep newest doc_date), drop chunks under 150 chars, clamp
-to a dynamic score floor (max(top_score - gap, floor)), min 3 / max 12
-docs, and stop at a hard token budget rather than a doc count.
+to an absolute score floor (ADR 0002 — no dynamic top-score gap), min 3 /
+max 12 docs, and stop at a hard token budget rather than a doc count.
 
 normalize_title(): strips revision/version/date noise from a title so two
 printings of the same manual ("Safety Manual Rev 3", "Safety Manual (May
@@ -47,8 +47,7 @@ def crop_context(
     min_docs: int = 3,
     max_docs: int = 12,
     max_chunks_per_doc: int = 3,
-    score_gap: float = 0.15,
-    score_floor: float = 0.0,
+    score_floor: float = 0.02,
     token_budget: int = 6000,
     min_chars: int = 150,
 ) -> list[dict]:
@@ -103,9 +102,10 @@ def crop_context(
     if not pool:
         return []
 
-    top_score = pool[0]["score"]
-    floor = max(top_score - score_gap, score_floor)
-    kept = [h for h in pool if h["score"] >= floor]
+    # Floor-only (ADR 0002): everything below an absolute relevance bar is
+    # cut. No dynamic top-score gap — a single erratic rerank spike must
+    # never starve the rest of the context.
+    kept = [h for h in pool if h["score"] >= score_floor]
 
     if len(kept) < min_docs:
         kept = pool[:min_docs]
