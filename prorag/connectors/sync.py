@@ -46,6 +46,10 @@ _SINCE_SAFETY_BUFFER = timedelta(seconds=5)
 
 
 def _build_connector(connector_row: Connector) -> S3Connector:
+    """When called: at the start of sync_incremental and full_sweep. What:
+    constructs the concrete connector client for the row's type+config (only
+    "s3" is supported today), raising ValueError on unknown types. Returns:
+    the S3Connector."""
     if connector_row.type == "s3":
         return S3Connector(connector_row.config)
     raise ValueError(f"unknown connector type: {connector_row.type}")

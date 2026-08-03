@@ -21,6 +21,10 @@ class GZipSkipSSEMiddleware:
         self.minimum_size = minimum_size
 
     async def __call__(self, scope, receive, send):
+        """When called: by the ASGI server on every request through this
+        middleware. What: passes non-HTTP scopes and non-gzip clients straight
+        through; otherwise buffers the response and gzips it (skipping
+        `text/event-stream`, see class docstring)."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -74,6 +78,10 @@ class RequestTimingMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        """When called: by the ASGI server on every request through this
+        middleware. What: times each HTTP request, stamps the response with
+        `X-Response-Time-Ms`, and logs one line per request; non-HTTP scopes
+        pass through."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return

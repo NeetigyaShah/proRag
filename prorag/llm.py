@@ -7,14 +7,26 @@ DB session is passed in, via prorag.cost.track_usage().
 """
 
 import asyncio
+import os
 
 import litellm
 
 from prorag.cost import track_usage
 from prorag.settings import settings
 
+# litellm authenticates providers via os.environ — a key that lives only in
+# .env (visible to Settings, not to os.environ) would fail every litellm path
+# (answer, answer_stream, plan_completion, aembedding) from a bare shell.
+# Export it once at import; a real env var (higher-priority) wins untouched.
+if settings.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):
+    os.environ["OPENROUTER_API_KEY"] = settings.openrouter_api_key
+
 
 def _usage_tokens(resp) -> tuple[int, int]:
+    """When called: by answer(), answer_stream() and embed_texts() to read
+    token counts off a litellm response. What: pulls prompt/completion token
+    counts, defaulting to 0 when absent. Returns: (prompt_tokens,
+    completion_tokens)."""
     usage = resp.get("usage") or {}
     return usage.get("prompt_tokens", 0) or 0, usage.get("completion_tokens", 0) or 0
 
@@ -78,20 +90,33 @@ async def embed_texts_batched(texts: list[str], session=None) -> list[list[float
 
 
 async def embed_texts(texts: list[str], session=None, user_id=None) -> list[list[float]]:
+    """When called: by every embedding consumer — query planning
+    (operations/retrieval.py), GET /search (retrieve/router.py), rule
+    preview/confirm (admin/router.py), doctor's check_embed, and
+    embed_texts_batched(). What: embeds all texts via the configured
+    embed_model (OpenRouter direct call, local sentence-transformers, or
+    litellm) and records usage when a session is given. Returns: one vector
+    per input text, in order."""
     if not texts:
         return []
     if settings.embed_model.startswith("openrouter-embed/"):
         # OpenRouter's /embeddings endpoint isn't in litellm's provider map —
         # call it directly.
-        import os
-
         import httpx
 
+        api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            # A clear error beats the old raw KeyError: this branch is reached
+            # whenever EMBED_MODEL is an openrouter-embed/* model, and the key
+            # can live in .env (settings field) or the process env.
+            raise RuntimeError(
+                "OPENROUTER_API_KEY is not set — openrouter-embed models need it (set it in .env)"
+            )
         model_name = settings.embed_model.removeprefix("openrouter-embed/")
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://openrouter.ai/api/v1/embeddings",
-                headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+                headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model_name, "input": texts},
             )
             resp.raise_for_status()
@@ -112,6 +137,10 @@ async def embed_texts(texts: list[str], session=None, user_id=None) -> list[list
 
 
 async def answer(system: str, user: str, session=None, message_id=None, user_id=None) -> str:
+    """When called: by POST /chat (chat/router.py) and /eval/run
+    (eval/runner.py) for the full-strength answer. What: one non-streaming
+    completion via settings.answer_model, recording prompt/completion tokens
+    to usage when a session is given. Returns: the model's text response."""
     resp = await litellm.acompletion(
         model=settings.answer_model,
         messages=[
@@ -177,4 +206,24 @@ async def plan_completion(system: str, user: str, session=None, user_id=None) ->
     )
     prompt_tokens, completion_tokens = _usage_tokens(resp)
     track_usage(session, settings.planner_model, prompt_tokens, completion_tokens, user_id=user_id)
+    return resp["choices"][0]["message"]["content"]
+
+
+async def prefill_completion(system: str, user: str, session=None, user_id=None) -> str:
+    """Cheapest-tier call for the prefill agent (query refinement). Deliberately
+    hard-capped: a bounded max_tokens keeps the output tiny (the contract is
+    one JSON object) and the timeout keeps a slow free-tier model from adding
+    more than a few seconds to the retrieval path. Callers must never rely on
+    this succeeding — retrieve() falls back to the raw prompt on any error."""
+    resp = await litellm.acompletion(
+        model=settings.prefill_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=settings.prefill_max_tokens,
+        timeout=settings.prefill_timeout,
+    )
+    prompt_tokens, completion_tokens = _usage_tokens(resp)
+    track_usage(session, settings.prefill_model, prompt_tokens, completion_tokens, user_id=user_id)
     return resp["choices"][0]["message"]["content"]

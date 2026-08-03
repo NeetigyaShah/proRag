@@ -12,10 +12,10 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from prorag.chat.router import check_daily_cap
 from prorag.db import get_session
 from prorag.eval.runner import run_eval
 from prorag.models import EvalRun
+from prorag.operations.budget import check_daily_cap
 from prorag.schemas import EvalRunDetail, EvalRunResponse
 from prorag.settings import settings
 
@@ -24,6 +24,9 @@ router = APIRouter()
 
 @router.post("/eval/run", response_model=EvalRunResponse)
 async def eval_run(session: AsyncSession = Depends(get_session)):
+    """When called: on every POST /eval/run. What: checks the install-wide
+    daily cap, runs the golden-set eval under eval_timeout_seconds, and maps a
+    timeout to HTTP 504. Returns: EvalRunResponse (run_id + aggregate)."""
     # One eval = one planner + one embed + one answer call *per golden entry*.
     # /chat checks the daily cap before spending a token; this endpoint spends
     # N times as much and must too.
@@ -43,6 +46,9 @@ async def eval_run(session: AsyncSession = Depends(get_session)):
 
 @router.get("/eval/runs/{run_id}", response_model=EvalRunDetail)
 async def get_eval_run(run_id: int, session: AsyncSession = Depends(get_session)):
+    """When called: on every GET /eval/runs/{run_id}. What: loads the stored
+    eval run by id, 404 if missing. Returns: EvalRunDetail (run_id,
+    created_at, aggregate, per-question rows)."""
     run = await session.get(EvalRun, run_id)
     if run is None:
         raise HTTPException(404, "eval run not found")

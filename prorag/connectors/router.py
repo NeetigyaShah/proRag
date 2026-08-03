@@ -30,6 +30,10 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
 async def require_admin(user: User | None = Depends(current_user)) -> None:
+    """When called: FastAPI dependency on every /connectors route here and on
+    every /admin route (prorag/admin/router.py), before the handler runs.
+    What: passes when auth is disabled, else requires a present is_admin user,
+    raising 403 otherwise. Returns: None."""
     if not settings.auth_enabled:
         return
     if user is None or not user.is_admin:
@@ -37,6 +41,9 @@ async def require_admin(user: User | None = Depends(current_user)) -> None:
 
 
 async def _get_or_404(session: AsyncSession, connector_id: uuid.UUID) -> Connector:
+    """When called: by the GET/PATCH/DELETE/sync handlers to load the target
+    connector. What: SELECTs the Connector row by id, raising 404 if absent.
+    Returns: the Connector row."""
     row = (await session.execute(select(Connector).where(Connector.id == connector_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, "connector not found")
@@ -45,6 +52,8 @@ async def _get_or_404(session: AsyncSession, connector_id: uuid.UUID) -> Connect
 
 @router.post("", response_model=ConnectorOut, status_code=201, dependencies=[Depends(require_admin)])
 async def create_connector(body: ConnectorCreate, session: AsyncSession = Depends(get_session)):
+    """When called: on every POST /connectors. What: builds a Connector row
+    from the request body and persists it. Returns: the created ConnectorOut row."""
     row = Connector(id=uuid.uuid4(), type=body.type, name=body.name, config=body.config, enabled=body.enabled)
     session.add(row)
     await session.commit()
@@ -53,11 +62,15 @@ async def create_connector(body: ConnectorCreate, session: AsyncSession = Depend
 
 @router.get("", response_model=list[ConnectorOut], dependencies=[Depends(require_admin)])
 async def list_connectors(session: AsyncSession = Depends(get_session)):
+    """When called: on every GET /connectors. What: loads every connector row.
+    Returns: the full list of ConnectorOut rows."""
     return (await session.execute(select(Connector))).scalars().all()
 
 
 @router.get("/{connector_id}", response_model=ConnectorOut, dependencies=[Depends(require_admin)])
 async def get_connector(connector_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: on every GET /connectors/{connector_id}. What: loads the
+    connector, 404 if it doesn't exist. Returns: the ConnectorOut row."""
     return await _get_or_404(session, connector_id)
 
 
@@ -65,6 +78,9 @@ async def get_connector(connector_id: uuid.UUID, session: AsyncSession = Depends
 async def update_connector(
     connector_id: uuid.UUID, body: ConnectorUpdate, session: AsyncSession = Depends(get_session)
 ):
+    """When called: on every PATCH /connectors/{connector_id}. What: applies the
+    request body's provided fields to the stored connector and commits.
+    Returns: the updated ConnectorOut row."""
     row = await _get_or_404(session, connector_id)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(row, field, value)
@@ -74,6 +90,8 @@ async def update_connector(
 
 @router.delete("/{connector_id}", status_code=204, dependencies=[Depends(require_admin)])
 async def delete_connector(connector_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: on every DELETE /connectors/{connector_id}. What: deletes
+    the connector row and commits. Returns: None (HTTP 204)."""
     row = await _get_or_404(session, connector_id)
     await session.delete(row)
     await session.commit()

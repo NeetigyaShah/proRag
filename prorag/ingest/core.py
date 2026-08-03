@@ -63,6 +63,10 @@ _TRANSIENT_ERROR_MARKERS = (
 
 
 def _is_transient(exc: Exception) -> bool:
+    """When called: inside _embed_with_retry() after a failed embed call, to
+    decide whether retrying can help. What: matches the exception text against
+    known transient markers (timeout, rate limit, 5xx, connection, …).
+    Returns: True to retry, False to give up immediately."""
     return any(m in f"{type(exc).__name__} {exc}".lower() for m in _TRANSIENT_ERROR_MARKERS)
 
 
@@ -131,6 +135,9 @@ async def _store_table(
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """When called: _apply_confirmed_rules(), once per (rule, chunk) pair.
+    What: cosine similarity between two embedding vectors; 0.0 when either is
+    zero-length. Returns: a float in [0, 1]."""
     dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = sum(x * x for x in a) ** 0.5
     norm_b = sum(x * x for x in b) ** 0.5

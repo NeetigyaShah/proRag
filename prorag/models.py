@@ -10,10 +10,15 @@ per #15 (no ACLs to mirror, so no document_acl rows — admin-only by default).
 # ponytail: a `jobs` table (§7, SKIP LOCKED queue) still isn't implemented —
 # ingestion stays inline; Phase 5's retry loop lives in ingest/router.py
 # instead. Add the real queue if/when ingestion needs to run out-of-request.
+
+Persistence layer: these tables are created by the migration scripts and are
+read/written by every operation that stores data (ingest, retrieve, chat,
+admin, eval).
 """
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -39,10 +44,17 @@ from prorag.settings import settings
 
 
 class Base(DeclarativeBase):
+    """Declarative base every table model inherits from — gives SQLAlchemy a
+    single shared metadata registry for tables and migrations."""
+
     pass
 
 
 class Document(Base):
+    """A single uploaded file (or connector-synced object) and its ingest
+    lifecycle: `status` moves pending → processing → ready/failed, `sha256`
+    dedups identical content, `title_norm` is the §4.4 revision-dedup key."""
+
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -55,7 +67,12 @@ class Document(Base):
     title_norm: Mapped[str | None] = mapped_column(String, nullable=True)  # §4.4 revision dedup key
     collection: Mapped[str] = mapped_column(String, nullable=False, default="default")
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    # Pinned to the same Literal set IngestResponse validates (schemas.py) —
+    # the state machine pending->processing->ready|failed is now in the type
+    # system, so a stray status string fails at type-check time, not at 500.
+    status: Mapped[Literal["pending", "processing", "ready", "failed"]] = mapped_column(
+        String, nullable=False, default="pending"
+    )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -64,6 +81,10 @@ class Document(Base):
 
 
 class Chunk(Base):
+    """One searchable unit of a document (prose paragraph or table region)
+    with its embedding vector and full-text `tsv` — what retrieval ranks and
+    returns to the answerer."""
+
     __tablename__ = "chunks"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -93,6 +114,10 @@ class Chunk(Base):
 
 
 class Table(Base):
+    """A table extracted from a document (Phase 3): caption/columns/row_count
+    describe the extraction, rows live in TableRow, and chunks can be linked
+    to it for table-aware retrieval."""
+
     __tablename__ = "tables"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -111,6 +136,8 @@ class Table(Base):
 
 
 class TableRow(Base):
+    """One row of an extracted table, its cells stored as JSONB `data`."""
+
     __tablename__ = "table_rows"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -126,6 +153,8 @@ class TableRow(Base):
 
 
 class Chat(Base):
+    """A chat thread; `messages` are its ordered turns."""
+
     __tablename__ = "chats"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -135,6 +164,9 @@ class Chat(Base):
 
 
 class Message(Base):
+    """One turn in a chat (`role` is user | assistant); `content` is the raw
+    text and `citations` link the [Sn] markers the answerer cited (§5.3)."""
+
     __tablename__ = "messages"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -81,6 +81,10 @@ async def list_documents(
     q: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
+    """When called: GET /admin/documents (dashboard documents view).
+    What: paged, filterable document list (status/collection/text query/group
+    label/connector source), with per-document group labels and connector
+    names attached. Returns: {items, total, page, page_size}."""
     conditions = []
     if status:
         conditions.append(Document.status == status)
@@ -220,6 +224,9 @@ async def document_access(doc_id: uuid.UUID, session: AsyncSession = Depends(get
 
 
 async def _get_rule_or_404(session: AsyncSession, rule_id: uuid.UUID) -> AccessRule:
+    """When called: by every /admin/rules handler before acting on a rule.
+    What: fetches an access rule by id, raising 404 if it doesn't exist.
+    Returns: the AccessRule row."""
     rule = await session.get(AccessRule, rule_id)
     if rule is None:
         raise HTTPException(404, "rule not found")
@@ -248,6 +255,9 @@ async def _rule_candidates(session: AsyncSession, query_embedding: list[float]):
 
 @router.post("/rules", response_model=AccessRuleOut, status_code=201)
 async def create_rule(body: AccessRuleCreate, session: AsyncSession = Depends(get_session)):
+    """When called: POST /admin/rules (dashboard creates an access rule).
+    What: creates a draft rule for the given group, 404 if the group doesn't
+    exist. Returns: the new AccessRule."""
     if await session.get(Group, body.group_id) is None:
         raise HTTPException(404, "group not found")
     rule = AccessRule(id=uuid.uuid4(), name=body.name, nl_query=body.nl_query, group_id=body.group_id)
@@ -258,16 +268,23 @@ async def create_rule(body: AccessRuleCreate, session: AsyncSession = Depends(ge
 
 @router.get("/rules", response_model=list[AccessRuleOut])
 async def list_rules(session: AsyncSession = Depends(get_session)):
+    """When called: GET /admin/rules. What: all access rules, newest first.
+    Returns: list of AccessRule."""
     return (await session.execute(select(AccessRule).order_by(AccessRule.created_at.desc()))).scalars().all()
 
 
 @router.get("/rules/{rule_id}", response_model=AccessRuleOut)
 async def get_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: GET /admin/rules/{rule_id}. What: fetches one access rule.
+    Returns: the AccessRule, 404 if unknown."""
     return await _get_rule_or_404(session, rule_id)
 
 
 @router.patch("/rules/{rule_id}", response_model=AccessRuleOut)
 async def update_rule(rule_id: uuid.UUID, body: AccessRuleUpdate, session: AsyncSession = Depends(get_session)):
+    """When called: PATCH /admin/rules/{rule_id}. What: applies the editable
+    fields to a draft rule — confirmed rules are refused (v1 is confirm-once,
+    see #10). Returns: the updated AccessRule."""
     rule = await _get_rule_or_404(session, rule_id)
     if rule.state != "draft":
         # v1 ships confirm-once (#10's out-of-scope note): no pending-diff
@@ -284,6 +301,9 @@ async def update_rule(rule_id: uuid.UUID, body: AccessRuleUpdate, session: Async
 
 @router.delete("/rules/{rule_id}", status_code=204)
 async def delete_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: DELETE /admin/rules/{rule_id}. What: revokes every grant
+    the rule ever wrote (source='rule:{id}') and deletes the rule, so deletion
+    takes effect immediately (#4). Returns: 204."""
     rule = await _get_rule_or_404(session, rule_id)
     # #4: "deleting a rule revokes its grants immediately" — every grant this
     # rule ever wrote is tagged source='rule:{id}', so revocation is one
@@ -295,6 +315,10 @@ async def delete_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_se
 
 @router.post("/rules/{rule_id}/preview")
 async def preview_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: POST /admin/rules/{rule_id}/preview (dashboard "what would
+    this rule match" before confirming). What: embeds the rule's nl_query and
+    runs the admin-unfiltered candidate search, persisting nothing. Returns:
+    {count, sample (top 10 docs with similarity), similarity_floor}."""
     rule = await _get_rule_or_404(session, rule_id)
     [embedding] = await embed_texts([rule.nl_query], session=session)
     rows = await _rule_candidates(session, embedding)
@@ -307,6 +331,10 @@ async def preview_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_s
 
 @router.post("/rules/{rule_id}/confirm", response_model=AccessRuleOut)
 async def confirm_rule(rule_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: POST /admin/rules/{rule_id}/confirm (dashboard commits a
+    previewed rule). What: persists the rule's embedding, marks it confirmed,
+    and writes group grants for every candidate document (deduped, so
+    re-confirming never duplicates). Returns: the confirmed AccessRule."""
     rule = await _get_rule_or_404(session, rule_id)
     if rule.state == "confirmed":
         raise HTTPException(400, "rule already confirmed")
@@ -378,6 +406,9 @@ async def list_users(
     page_size: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ):
+    """When called: GET /admin/users (dashboard people view). What: paged user
+    list with each user's group names and today's spend. Returns:
+    {items, total, page, page_size}."""
     total = (await session.execute(select(func.count()).select_from(User))).scalar_one()
     users = (
         (
@@ -426,6 +457,9 @@ async def list_users(
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: uuid.UUID, body: UserPatch, session: AsyncSession = Depends(get_session)):
+    """When called: PATCH /admin/users/{user_id} (dashboard edits a person).
+    What: applies the editable user fields (admin flag, disabled_at, daily cap
+    override). Returns: the updated subset of user fields."""
     user = await session.get(User, user_id)
     if user is None:
         raise HTTPException(404, "user not found")
@@ -476,6 +510,9 @@ async def user_visible_docs(
 
 @router.post("/groups", response_model=GroupOut, status_code=201)
 async def create_group(body: GroupCreate, session: AsyncSession = Depends(get_session)):
+    """When called: POST /admin/groups. What: creates a locally-managed group
+    (idp-synced groups are created by the sync instead). Returns: the new
+    Group."""
     group = Group(id=uuid.uuid4(), name=body.name, source="local")
     session.add(group)
     await session.commit()
@@ -484,10 +521,15 @@ async def create_group(body: GroupCreate, session: AsyncSession = Depends(get_se
 
 @router.get("/groups", response_model=list[GroupOut])
 async def list_groups(session: AsyncSession = Depends(get_session)):
+    """When called: GET /admin/groups. What: all groups, sorted by name.
+    Returns: list of Group."""
     return (await session.execute(select(Group).order_by(Group.name))).scalars().all()
 
 
 async def _get_local_group_or_404(session: AsyncSession, group_id: uuid.UUID) -> Group:
+    """When called: by the /admin/groups mutation handlers. What: fetches a
+    group by id, 404 if missing, 400 if idp-synced (only locally-created
+    groups are editable here). Returns: the Group row."""
     group = await session.get(Group, group_id)
     if group is None:
         raise HTTPException(404, "group not found")
@@ -500,6 +542,8 @@ async def _get_local_group_or_404(session: AsyncSession, group_id: uuid.UUID) ->
 
 @router.patch("/groups/{group_id}", response_model=GroupOut)
 async def update_group(group_id: uuid.UUID, body: GroupCreate, session: AsyncSession = Depends(get_session)):
+    """When called: PATCH /admin/groups/{group_id}. What: renames a local
+    group. Returns: the updated Group."""
     group = await _get_local_group_or_404(session, group_id)
     group.name = body.name
     await session.commit()
@@ -508,6 +552,8 @@ async def update_group(group_id: uuid.UUID, body: GroupCreate, session: AsyncSes
 
 @router.delete("/groups/{group_id}", status_code=204)
 async def delete_group(group_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: DELETE /admin/groups/{group_id}. What: deletes a local
+    group. Returns: 204."""
     group = await _get_local_group_or_404(session, group_id)
     await session.delete(group)
     await session.commit()
@@ -515,6 +561,8 @@ async def delete_group(group_id: uuid.UUID, session: AsyncSession = Depends(get_
 
 @router.post("/groups/{group_id}/members/{user_id}", status_code=204)
 async def add_group_member(group_id: uuid.UUID, user_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: POST /admin/groups/{group_id}/members/{user_id}. What:
+    adds a user to a local group, no-op if already a member. Returns: 204."""
     await _get_local_group_or_404(session, group_id)
     if await session.get(User, user_id) is None:
         raise HTTPException(404, "user not found")
@@ -525,6 +573,8 @@ async def add_group_member(group_id: uuid.UUID, user_id: uuid.UUID, session: Asy
 
 @router.delete("/groups/{group_id}/members/{user_id}", status_code=204)
 async def remove_group_member(group_id: uuid.UUID, user_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    """When called: DELETE /admin/groups/{group_id}/members/{user_id}. What:
+    removes a user from a local group (idempotent). Returns: 204."""
     await _get_local_group_or_404(session, group_id)
     await session.execute(delete(UserGroup).where(UserGroup.user_id == user_id, UserGroup.group_id == group_id))
     await session.commit()
@@ -537,6 +587,10 @@ _WINDOW_RE = re.compile(r"^(\d+)d$")
 
 @router.get("/usage")
 async def usage_report(window: str = "7d", session: AsyncSession = Depends(get_session)):
+    """When called: GET /admin/usage (dashboard usage view). What: aggregates
+    usage rows by user/day(UTC)/model for the last `window` days (e.g. "7d"),
+    plus the list of users already at/over their daily cap today. Returns:
+    {items, warned_users}."""
     m = _WINDOW_RE.match(window)
     if not m:
         raise HTTPException(400, "window must look like '7d'")

@@ -20,6 +20,10 @@ _CANONICAL = re.compile(r"\[S(\d+)\]")
 
 
 def normalize_citations(text: str) -> str:
+    """When called: on the raw LLM answer — chat/router.py before persisting
+    and resolving sources, and eval/runner.py when scoring answers. What:
+    maps common LLM citation deviations ((S1), [s1], [source 1], [1]) to the
+    canonical [S1] form. Returns: the normalized text."""
     normalized = text
     for pattern in _DEVIATION_PATTERNS:
         normalized = pattern.sub(lambda m: f"[S{m.group(1)}]", normalized)

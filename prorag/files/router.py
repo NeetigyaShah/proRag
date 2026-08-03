@@ -1,4 +1,9 @@
-"""GET /files/{doc_id}/original — serve the stored blob.
+"""HTTP layer for serving stored document blobs and table rows: runs on
+GET /files/{doc_id}/original (the pdf.js viewer fetches the blob here) and
+GET /tables/{table_id}/rows (the CSV citation grid). Both routes enforce
+document visibility (#18) before serving.
+
+GET /files/{doc_id}/original — serve the stored blob.
 GET /tables/{table_id}/rows — JSONB rows, backs the CSV citation grid (§6)."""
 
 import uuid

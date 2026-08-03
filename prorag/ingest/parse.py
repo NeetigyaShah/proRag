@@ -6,19 +6,20 @@ absent, and callers automatically fall back to the PyMuPDF path on import
 failure or parse failure.
 """
 
+import importlib.util
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import fitz  # PyMuPDF
 
 from prorag.ingest.chunk import Element
 
-try:
-    from docling.document_converter import DocumentConverter  # type: ignore
-
-    DOCLING_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only where docling is absent
-    DocumentConverter = None  # type: ignore
-    DOCLING_AVAILABLE = False
+# Probe WITHOUT importing: `import docling` pulls torch, which costs ~30-75s
+# of process start on this machine. find_spec only checks the package exists;
+# the real import happens once, lazily, inside _get_docling_converter() on the
+# first docling parse — same idiom as llm.py's local embedder.
+DOCLING_AVAILABLE = importlib.util.find_spec("docling") is not None
 
 
 # Magic-byte signatures. Extension-only routing trusts the uploader; a file
@@ -56,6 +57,9 @@ def sniff_mime(data: bytes) -> str | None:
 
 @dataclass
 class ParsedTable:
+    """One detected table from any parse path (Docling or pandas): header
+    columns plus record rows, ready for table-artifact generation."""
+
     caption: str | None
     columns: list[str]
     rows: list[dict]
@@ -98,22 +102,77 @@ STRUCTURED_MIMES = {
 }
 
 
+def _make_docling_converter():
+    """Build the memory-tuned DocumentConverter (docling >= 2.117 API).
+
+    Measured on this machine (i5-1135G7 laptop, 16 GB): the default pipeline
+    OOM'd (std::bad_alloc) at page ~99 of a 474-page PDF. With these options
+    the same PDF converts fully (~218s) with 19 tables extracted and only the
+    last few pages lost to memory pressure — docling reports per-page
+    failures and continues, so the loss is graceful either way.
+
+    Settings that matter for memory (per docling docs):
+    - batch sizes pinned to 1 (defaults process several pages at once)
+    - do_ocr=False — digital PDFs have a text layer; OCR is pure memory cost
+    - images_scale=1.0 — the default 2.0 quadruples pixel memory per page
+    - picture/table image generation off (nothing here consumes those)
+    """
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import AcceleratorOptions, ThreadedPdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
+
+    opts = ThreadedPdfPipelineOptions(
+        ocr_batch_size=1,
+        layout_batch_size=1,
+        table_batch_size=1,
+        accelerator_options=AcceleratorOptions(num_threads=1, device="cpu"),
+    )
+    opts.do_ocr = False
+    opts.images_scale = 1.0
+    opts.generate_page_images = False
+    opts.generate_picture_images = False
+    opts.generate_table_images = False
+
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_cls=ThreadedStandardPdfPipeline,
+                pipeline_options=opts,
+            )
+        }
+    )
+
+
+_docling_converter = None
+
+
+def _get_docling_converter():
+    """Lazy singleton, same idiom as llm.py's local embedder: the pipeline
+    holds ~100MB of layout-model weights; rebuilding it per ingest request
+    would reload them every time. Imports docling here (first call only) so
+    process startup and the test suite never pay torch's import cost."""
+    global _docling_converter
+    if _docling_converter is None:
+        if not DOCLING_AVAILABLE:
+            raise ImportError("docling not installed; PyMuPDF fallback is active")
+        _docling_converter = _make_docling_converter()
+    return _docling_converter
+
+
 def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument | None:
     """Parse via Docling, splitting the element stream into prose vs Table
     elements (§3.1/§3.2). Returns None if Docling isn't installed or parsing
     fails — the caller falls back to PyMuPDF."""
     if not DOCLING_AVAILABLE or mime not in DOCLING_MIMES:
         return None
+    tmp_path: str | None = None
     try:
-        import tempfile
-        from pathlib import Path
-
         suffix = Path(filename).suffix or ".pdf"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(data)
             tmp_path = f.name
-
-        converter = DocumentConverter()
+        converter = _get_docling_converter()
         result = converter.convert(tmp_path)
         dl_doc = result.document
 
@@ -136,7 +195,10 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
                 continue
 
             if str(label).lower() == "table" or type(item).__name__ == "TableItem":
-                table_df = item.export_to_dataframe() if hasattr(item, "export_to_dataframe") else None
+                # doc=dl_doc: docling >= 2.117 deprecates the no-arg call (and
+                # the table's text extraction needs the parent document for
+                # header-row resolution in newer versions).
+                table_df = item.export_to_dataframe(doc=dl_doc) if hasattr(item, "export_to_dataframe") else None
                 if table_df is not None:
                     columns = [str(c) for c in table_df.columns]
                     rows = table_df.to_dict(orient="records")
@@ -155,9 +217,22 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
             if text.strip():
                 prose.append(Element(text=text, page=page_no or 1, heading_path=list(heading_stack), bbox=bbox))
 
-        return ParsedDocument(prose=prose, tables=tables, page_count=getattr(dl_doc, "num_pages", None))
+        # docling's num_pages flipped from a property to a method in 2.117 —
+        # call it when it's callable so the value survives both APIs. A bound
+        # method object here would crash the Document INSERT (asyncpg DataError)
+        # after a successful parse, 500-ing the ingest and orphaning the blob.
+        num_pages = getattr(dl_doc, "num_pages", None)
+        page_count = num_pages() if callable(num_pages) else num_pages
+
+        return ParsedDocument(prose=prose, tables=tables, page_count=page_count)
     except Exception:
         return None
+    finally:
+        # The converter reads the file at convert() time; the parsed document
+        # lives in memory after that, so the temp copy is always disposable.
+        # Without this, every docling parse leaked one file into %TEMP%.
+        if tmp_path is not None:
+            Path(tmp_path).unlink(missing_ok=True)
 
 
 def parse_structured(data: bytes, mime: str) -> list[ParsedTable]:
@@ -180,6 +255,9 @@ def parse_structured(data: bytes, mime: str) -> list[ParsedTable]:
 
 
 def guess_mime(filename: str) -> str:
+    """When called: ingest_bytes() on every upload, before parsing, to route
+    the file to a parser. What: maps the filename extension to a MIME type;
+    unknown suffixes fall back to text/plain. Returns: the MIME string."""
     lower = filename.lower()
     if lower.endswith(".pdf"):
         return "application/pdf"

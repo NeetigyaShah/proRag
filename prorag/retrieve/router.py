@@ -1,6 +1,10 @@
 """GET /search — retrieval debug endpoint: per-arm results + fused + reranked
 lists, so hybrid retrieval tuning has something to look at without going
-through the LLM (§6)."""
+through the LLM (§6).
+
+The pipeline itself is shared with the chat flow (operations/retrieval.py) —
+this handler only shapes the per-stage breakdown for display.
+"""
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,9 +13,8 @@ from prorag.auth import current_user
 from prorag.db import get_session
 from prorag.llm import embed_texts
 from prorag.models import User
-from prorag.retrieve.arms import keyword_search, structured_search, vector_search
+from prorag.operations.retrieval import gather_hits
 from prorag.retrieve.crop import crop_context
-from prorag.retrieve.fuse import rrf_fuse
 from prorag.retrieve.plan import plan
 from prorag.retrieve.rerank import rerank
 from prorag.settings import settings
@@ -27,23 +30,14 @@ async def search(
     queries = plan_result["queries"]
 
     embeddings = await embed_texts(queries, session=session)
-    # Sequential for the same reason as chat/router.py's retrieve(): one
-    # AsyncSession is one connection and forbids overlapping execute() calls.
+    # Sequential for the same reason as operations/retrieval.py's gather_hits():
+    # one AsyncSession is one connection and forbids overlapping execute() calls.
     # This endpoint is where that actually bit — it hands retrieve's arms a cold
     # session, so the gather raised InvalidRequestError rather than just
     # serializing.
-    vector_lists = [await vector_search(session, e, settings.rerank_top_n, user=user) for e in embeddings]
-    fts_lists = [await keyword_search(session, query, settings.rerank_top_n, user=user) for query in queries]
-    wants_table = plan_result.get("mode") == "table"
-    structured_lists = (
-        [await structured_search(session, query, settings.rerank_top_n, user=user) for query in queries]
-        if wants_table
-        else []
+    queries, vector_lists, fts_lists, structured_lists, fused = await gather_hits(
+        session, plan_result, embeddings, user=user
     )
-
-    ranked_lists = [*vector_lists, *fts_lists, *structured_lists]
-    weights = [1.0] * len(vector_lists) + [1.0] * len(fts_lists) + [settings.structured_weight] * len(structured_lists)
-    fused = rrf_fuse(ranked_lists, weights=weights)
     reranked = await rerank(queries[0], fused[: settings.rerank_top_n])
     cropped = crop_context(
         reranked,

@@ -12,6 +12,7 @@ from prorag.retrieve.arms import _distance_expr, build_structured_query
 from prorag.retrieve.crop import crop_context, normalize_title
 from prorag.retrieve.fuse import rrf_fuse
 from prorag.retrieve.plan import _extract_json, _fallback, plan
+from prorag.retrieve.rerank import _rerank_api
 
 
 def _hit(chunk_id, **kw):
@@ -88,6 +89,23 @@ def test_crop_revision_aware_dedup_prefers_newer_doc_date():
     assert 2 in ids
 
 
+def test_crop_keeps_multiple_chunks_of_one_document():
+    """Sections of one PDF are all answerable: the dedup collapses *revisions*
+    (same title, different doc), not chunks of the same document."""
+    hits = [
+        _hit(1, score=0.9, title="Resume.pdf", doc_id="doc-a"),
+        _hit(2, score=0.85, title="Resume.pdf", doc_id="doc-a"),
+        _hit(3, score=0.8, title="Resume.pdf", doc_id="doc-a"),
+        _hit(4, score=0.7, title="Resume.pdf", doc_id="doc-a"),
+        _hit(5, score=0.6, title="Other.pdf", doc_id="doc-b"),
+    ]
+    cropped = crop_context(hits, min_docs=1, max_docs=12, score_gap=0.5, max_chunks_per_doc=3)
+    ids = [h["chunk_id"] for h in cropped]
+    assert ids[:3] == [1, 2, 3]  # top-3 chunks of the winning document
+    assert 4 not in ids  # beyond the per-document cap
+    assert 5 in ids
+
+
 def test_normalize_title_strips_revision_noise():
     assert normalize_title("Safety Manual Rev 3") == normalize_title("Safety Manual Rev 2")
     assert normalize_title("Safety Manual (May 2021)") == normalize_title("Safety Manual (Jan 2024)")
@@ -157,8 +175,10 @@ class _StrictSession:
 
 @pytest.fixture
 def patched_retrieve(monkeypatch):
-    """retrieve() with the network stubbed; each arm goes through session.execute."""
-    import prorag.chat.router as cr
+    """retrieve() with the network stubbed; each arm goes through session.execute.
+    Patches names on the operations module (operations/retrieval.py) — retrieve()
+    looks them up in its own module globals at call time."""
+    import prorag.operations.retrieval as cr
 
     async def arm(session, _q, _k, **_kw):
         await session.execute()
@@ -249,6 +269,91 @@ async def test_plan_happy_path(monkeypatch):
     monkeypatch.setattr(plan_module, "plan_completion", good)
     result = await plan("anything")
     assert result == {"search_needed": True, "queries": ["primary", "alt"], "mode": "table"}
+
+
+# ---- Rerank API (OpenRouter hosted cross-encoder backend) ------------------
+
+
+class _FakeRerankResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRerankClient:
+    """Stands in for httpx.AsyncClient inside _rerank_api: records the POST
+    payload so tests can assert what the endpoint was asked, and returns a
+    canned rerank response."""
+
+    def __init__(self, payload, **kwargs):
+        self._payload = payload
+        self.sent = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, **kwargs):
+        self.sent = kwargs.get("json")
+        return _FakeRerankResponse(self._payload)
+
+
+async def test_rerank_api_happy_path(monkeypatch):
+    payload = {
+        "results": [
+            {"index": 1, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.2},
+            {"index": 2, "relevance_score": 0.55},
+        ]
+    }
+    fake = _FakeRerankClient(payload)
+    monkeypatch.setattr("prorag.retrieve.rerank.httpx.AsyncClient", lambda **kw: fake)
+    hits = [_hit(1), _hit(2), _hit(3)]
+    out = await _rerank_api("q", hits)
+    # re-sorted by relevance desc; scores are the API's 0..1 as-is
+    assert [h["chunk_id"] for h in out] == [2, 3, 1]
+    assert abs(out[0]["score"] - 0.9) < 1e-9
+    assert abs(out[2]["score"] - 0.2) < 1e-9
+    # the endpoint got every chunk text plus the query
+    assert fake.sent["query"] == "q"
+    assert fake.sent["documents"] == ["x" * 200] * 3
+
+
+async def test_rerank_api_skips_out_of_range_indices(monkeypatch):
+    fake = _FakeRerankClient(
+        {"results": [{"index": 7, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.2}]}
+    )
+    monkeypatch.setattr("prorag.retrieve.rerank.httpx.AsyncClient", lambda **kw: fake)
+    hits = [_hit(1), _hit(2)]
+    out = await _rerank_api("q", hits)
+    assert [h["chunk_id"] for h in out] == [1]
+    assert abs(out[0]["score"] - 0.2) < 1e-9
+
+
+async def test_rerank_api_falls_back_on_error(monkeypatch):
+    class Boom:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, **kwargs):
+            raise RuntimeError("provider outage")
+
+    monkeypatch.setattr("prorag.retrieve.rerank.httpx.AsyncClient", Boom)
+    hits = [_hit(1, score=0.1), _hit(2, score=0.2)]
+    assert await _rerank_api("q", hits) is hits  # input order, same objects
 
 
 # ---- vector_search ORDER BY must match the hnsw expression index (#16) ------

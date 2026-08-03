@@ -1,4 +1,9 @@
-"""Pydantic request/response schemas."""
+"""Pydantic request/response schemas.
+
+API contracts layer: these models validate incoming request bodies and shape
+response payloads at the FastAPI boundary — they run on every request routed
+through the HTTP layer.
+"""
 
 import uuid
 from datetime import datetime
@@ -8,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class IngestResponse(BaseModel):
+    """POST /ingest response: the new document id, its ingest status, and the
+    id of the duplicate it was folded into when content matched (§4.4)."""
+
     doc_id: uuid.UUID
     # Every value that can reach here: ingest/router.py writes processing/ready/
     # failed, and models.py's column default is "pending" (reachable by any
@@ -21,6 +29,9 @@ class IngestResponse(BaseModel):
 
 
 class Source(BaseModel):
+    """One retrieved source in a chat answer — `n` is the [Sn] marker the
+    answer cites, with the snippet, score, and page/bbox for highlighting."""
+
     n: int
     doc_id: uuid.UUID
     page: int | None
@@ -33,6 +44,9 @@ class Source(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """POST /chat body: the user's message plus optional collection scope and
+    an existing chat_id to continue a thread."""
+
     # Strip before length validation (Pydantic runs it in that order), so "   "
     # is rejected rather than embedded, sent to the LLM and billed. The web UI
     # already trims, but the API is the trust boundary — a direct POST doesn't.
@@ -47,6 +61,9 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """POST /chat answer: the generated text, cited sources, the stored
+    message id, and an advisory budget_warning when over the soft cap (#21)."""
+
     answer: str
     sources: list[Source]
     message_id: uuid.UUID | None = None
@@ -56,6 +73,9 @@ class ChatResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
+    """POST /feedback body: like/dislike (`up`/`down`) on a message, with an
+    optional comment."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     message_id: uuid.UUID
@@ -64,16 +84,23 @@ class FeedbackRequest(BaseModel):
 
 
 class EvalRunResponse(BaseModel):
+    """POST /eval/run response: the run id and its aggregate scores."""
+
     run_id: int
     aggregate: dict
 
 
 class EvalRunDetail(EvalRunResponse):
+    """One eval run's detail view: run metadata plus per-question results."""
+
     created_at: datetime
     questions: list[dict]
 
 
 class ConnectorCreate(BaseModel):
+    """POST /connectors body: the source type, name, and connection config
+    (S3 endpoint/bucket/prefix/keys, plus an optional collection)."""
+
     type: Literal["s3"]
     name: str = Field(min_length=1, max_length=255)
     # endpoint_url/bucket/prefix/access key id/secret, plus an optional
@@ -85,12 +112,17 @@ class ConnectorCreate(BaseModel):
 
 
 class ConnectorUpdate(BaseModel):
+    """PATCH /connectors/{id} body: any of name/config/enabled, all optional."""
+
     name: str | None = Field(default=None, min_length=1, max_length=255)
     config: dict | None = None
     enabled: bool | None = None
 
 
 class ConnectorOut(BaseModel):
+    """Connector as returned to the admin (from_attributes: serializes the ORM
+    row directly)."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -105,6 +137,9 @@ class ConnectorOut(BaseModel):
 
 
 class SyncReport(BaseModel):
+    """POST /connectors/{id}/sync result: per-item outcome counts
+    (new/changed/deleted/skipped/errors)."""
+
     new: int
     changed: int
     deleted: int
@@ -113,12 +148,18 @@ class SyncReport(BaseModel):
 
 
 class AccessRuleCreate(BaseModel):
+    """POST /admin/rules body: a natural-language rule that grants a group
+    access to matching documents once confirmed (#4, #24)."""
+
     name: str = Field(min_length=1, max_length=255)
     nl_query: str = Field(min_length=1, max_length=2000)
     group_id: uuid.UUID
 
 
 class AccessRuleUpdate(BaseModel):
+    """PATCH /admin/rules/{id} body: edits allowed only while the rule is
+    still draft (v1 ships confirm-once)."""
+
     # v1 ships confirm-once (admin/router.py refuses this once state is
     # 'confirmed') — see AccessRule's docstring in models.py.
     name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -127,6 +168,8 @@ class AccessRuleUpdate(BaseModel):
 
 
 class AccessRuleOut(BaseModel):
+    """Rule as returned to the admin, including state and confirm timestamp."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -139,10 +182,14 @@ class AccessRuleOut(BaseModel):
 
 
 class GroupCreate(BaseModel):
+    """POST /admin/groups body: the group name."""
+
     name: str = Field(min_length=1, max_length=255)
 
 
 class GroupOut(BaseModel):
+    """Group as returned to the admin, including IdP source/external id."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -152,6 +199,9 @@ class GroupOut(BaseModel):
 
 
 class UserPatch(BaseModel):
+    """PATCH /admin/users/{id} body: optional admin flag, disable timestamp,
+    and per-user daily budget override (#21)."""
+
     is_admin: bool | None = None
     disabled_at: datetime | None = None
     daily_cap_usd_override: float | None = None

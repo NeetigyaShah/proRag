@@ -1,10 +1,12 @@
-# ProRag — all 6 phases complete
+# ProRag — self-hostable RAG platform
 
-Text in, cited answer out. See `ARCHITECTURE.md` for the full design and phased plan.
+Text in, cited answer out. See `ARCHITECTURE.md` for the full design and current status.
 
-Phase 1 scope: PDF/txt/md ingestion (PyMuPDF only), fixed ~700-token chunking with
-page numbers, embeddings + answering via LiteLLM, vector-only search (pgvector
-cosine), non-streaming `/chat` with `[Sn]` citations, and `/files/{doc_id}/original`.
+Core scope: PDF/txt/md/DOCX/PPTX/CSV/XLSX ingestion, structure-aware ~700-token chunking,
+hybrid retrieval (vector + BM25 + structured), RRF fusion, SSE streaming with `[Sn]`
+citations, a pdf.js viewer that opens the cited page with the sentence highlighted, and a
+multi-user layer — identity (OIDC + local accounts), ACL enforcement, per-user budgets,
+an S3 connector, and an admin API. The one open build item is the admin dashboard UI (#25).
 
 ## Setup
 
@@ -41,32 +43,72 @@ The pure-function smoke test (chunking + citation resolution, no DB/LLM needed):
 uv run pytest tests/test_chunk_citations.py
 ```
 
-## API surface (Phase 1 subset of §6)
+## API surface (summary — full list in ARCHITECTURE.md §6)
 
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/ingest` | multipart `file`, `collection?` → `202 {doc_id, status, duplicate_of?}` |
-| `POST` | `/chat` | `{message}` → `{answer, sources[]}` |
-| `GET` | `/files/{doc_id}/original` | serves the stored blob |
-| `GET` | `/healthz` | liveness |
+| `POST` | `/chat` | `{message}` → `{answer, sources[], budget_warning?}` |
+| `POST` | `/chat/stream` | SSE: status → sources → budget? → tokens → meta → done |
+| `GET` | `/search` | `?q&k` — retrieval without the LLM (debugging endpoint) |
+| `GET` | `/files/{doc_id}/original` | serves the stored blob; 404 when invisible to the caller |
+| `GET` | `/tables/{table_id}/rows` | JSONB rows backing the CSV citation grid |
+| `POST` | `/feedback` | `{message_id, rating: up\|down, comment?}` |
+| `POST` | `/auth/login` · `/auth/logout` | local accounts → `prorag_session` HttpOnly cookie |
+| `GET` | `/auth/oidc/login` · `/auth/oidc/callback` | Authlib OIDC; 404 when unconfigured |
+| `GET/POST` | `/connectors` · `GET/PATCH/DELETE /connectors/{id}` | S3 connector CRUD (admin) |
+| `POST` | `/connectors/{id}/sync` | `?full=` — incremental poll or mandatory sweep |
+| `GET` | `/admin/documents` · `/admin/documents/{id}/access` | documents + ACL provenance (admin) |
+| `POST/GET` | `/admin/rules` · `PATCH/DELETE /admin/rules/{id}` | access rules (admin) |
+| `POST` | `/admin/rules/{id}/preview` · `/confirm` | sample+count, then freeze + grant |
+| `GET` | `/admin/rules/{id}/grants` | audit feed |
+| `GET` | `/admin/users` · `PATCH /admin/users/{id}` | users + cap override + spend |
+| `GET` | `/admin/users/{id}/visible-docs` | reverse ACL |
+| `POST/GET` | `/admin/groups` · `PATCH/DELETE /admin/groups/{id}` | local groups only |
+| `POST/DELETE` | `/admin/groups/{id}/members/{user_id}` | membership |
+| `GET` | `/admin/usage` | `?window=7d` by user/day/model |
+| `GET` | `/healthz` · `/readyz` | liveness / (db + migrations) |
 
-## What's deliberately not here yet
+## Known gaps (see ARCHITECTURE.md §8 for the full list)
 
-A real `jobs`/SKIP-LOCKED worker queue is still later work (§8) — ingestion
-stays synchronous inline in the request handler, now with a retry-with-backoff
-around the embed step and a `status='failed'` path instead of a 500.
+- **Admin dashboard UI** — the backing API is complete (#24); the four views in `web-next`
+  (documents, rules, people, usage) are the one open issue (#25). To be designed via Open Design.
+- **Login/logout UI** — sessions work via `/auth/login` (curl/scripts) but there is no login page yet.
+- **Background ingestion** — no jobs/worker queue; ingestion runs inline in the request handler.
+- **Connectors beyond S3** — SharePoint/Graph, Google Drive, Confluence, Notion are researched and
+  sequenced but not built.
+- **SCIM** — JIT user provisioning only; no group sync scheduler yet.
 
-## Operations (Phase 5)
+## Operations
 
-- **Auth**: off by default (`AUTH_ENABLED=false`). Turn it on and mint a key:
+- **Auth**: off by default (`AUTH_ENABLED=false`). Turn it on for a human-account install:
+  ```bash
+  uv run python scripts/create_admin.py --email you@corp.com   # prints the password once
+  # then: POST /auth/login with email+password → prorag_session cookie (HttpOnly, SameSite=Lax)
+  ```
+  Or connect your IdP with the four OIDC settings (`OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+  `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_PATH`) — discovery handles the rest, groups claims
+  seed membership. Machine access stays on bearer keys:
   ```bash
   uv run python scripts/create_api_key.py --name "my laptop"
-  # then: curl -H "Authorization: Bearer <printed key>" http://localhost:8000/documents
+  # then: curl -H "Authorization: Bearer <printed key>" http://localhost:8000/stats
   ```
-- **Cost cap**: every planner/answer/embedding call is priced (`litellm.completion_cost()`,
-  falling back to `FALLBACK_PRICE_PER_1K_USD` for models litellm doesn't price) and
-  logged to the `usage` table. Once today's summed cost reaches `DAILY_COST_CAP_USD`,
-  `/chat` and `/chat/stream` return `429` before touching the LLM.
+- **Cost caps**: every planner/answer/embedding call is priced (`litellm.completion_cost()`,
+  falling back to `FALLBACK_PRICE_PER_1K_USD`) and logged to the `usage` table with a
+  `user_id`. Two layers: an install-wide hard cap (`DAILY_COST_CAP_USD` → `429` before
+  touching the LLM) and a per-user soft cap (`USER_DAILY_CAP_USD`, default $1.00 — the
+  request still runs but `/chat` carries a `budget_warning`; at `USER_HARD_CAP_MULTIPLIER`×
+  it refuses with "you have used $X of $Y today, resets at midnight UTC"). Both windows
+  are UTC. Admins override per user via `PATCH /admin/users/{id}`.
+- **Connectors**: S3-compatible object storage (AWS, MinIO, R2) via the admin API. The
+  scheduler polls every `CONNECTOR_POLL_SECONDS` (default 900 s) and runs a mandatory
+  full-ID sweep every `CONNECTOR_SWEEP_HOURS` (default 24) — that sweep is the deletion/
+  revocation signal. Manual trigger: `POST /connectors/{id}/sync?full=true`.
+- **Admin API**: documents (with the stored `error` string), access rules (preview →
+  confirm → grants + auto-admission of new matches), users/groups, reverse ACL, usage —
+  all under `/admin/*`, admin-gated.
+- **Smoke check**: `python -m prorag.doctor` — 8 checks (settings, db, migrations, blob
+  dir, llm, embed, rerank, bm25), exit nonzero on any genuine FAIL, WARNs don't fail it.
 - **Feedback**: `POST /feedback {"message_id", "rating": "up"|"down", "comment"?}`.
 - **Health**: `/healthz` is liveness; `/readyz` additionally runs `SELECT 1` against Postgres.
 
@@ -80,7 +122,8 @@ git clone <this repo> && cd ragPro
 cp .env.example .env   # fill in provider key(s), set AUTH_ENABLED=true, pick a real DAILY_COST_CAP_USD
 
 docker compose up -d postgres
-uv run python scripts/create_api_key.py --name prod   # save the printed key
+uv run python scripts/create_admin.py --email you@corp.com   # local admin account, prints the password once
+uv run python scripts/create_api_key.py --name prod          # optional: machine access, save the printed key
 
 docker compose up -d   # api's entrypoint runs `alembic upgrade head` itself before serving
 docker compose exec api python -m prorag.doctor   # day-one smoke check — OK/WARN/FAIL per setting
@@ -138,9 +181,16 @@ exactly what to uncomment and set to turn it on.
 
 ## Project status
 
-All 6 phases from `ARCHITECTURE.md` §8 are implemented: MVP ingestion + citations
-(Phase 1), hybrid retrieval + rerank (Phase 2), structured documents/tables (Phase 3),
-SSE streaming + the pdf.js viewer (Phase 4), auth/cost-cap/feedback/health (Phase 5),
-and golden-set evaluation + a tuning sweep + CI (Phase 6, this section). Optional
-Phase 7 ideas (query decomposition, HyDE, per-collection embeddings, ColBERT) remain
-speculative, per §8, until the eval numbers here say otherwise.
+**All original 6 phases are implemented** (MVP ingestion + citations, hybrid retrieval +
+rerank, structured documents/tables, SSE streaming + the pdf.js viewer, auth/cost-cap/
+feedback/health, golden-set evaluation + sweep + CI), **plus the product-ization arc**
+(issues #1–#24, July–Aug 2026): identity + ACL schema and enforcement, OIDC + local
+accounts + sessions, per-user budgets, packaging (auto-migrate entrypoint, `prorag doctor`,
+blob volume), the S3 connector + polling scheduler, and the admin dashboard backing API.
+Bug fixes shipped along the way: the dead HNSW index (#16), the cost-window UTC bug and
+real streamed token usage (#13), and the reverse-proxy defects (#14).
+
+**What remains:** the admin dashboard UI in `web-next` (#25, the one open issue — to be
+designed via Open Design), a login UI, a background ingestion worker, connectors beyond
+S3, and SCIM. Optional Phase 7 ideas (query decomposition, HyDE, per-collection
+embeddings, ColBERT) remain speculative until the eval numbers say otherwise.

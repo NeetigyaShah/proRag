@@ -1,10 +1,19 @@
-"""Every tunable lives here, nowhere else."""
+"""Every tunable lives here, nowhere else.
+
+Configuration layer: all tunables as pydantic-settings fields, loaded once at
+import time from .env / environment variables (module-level `settings`), then
+read at boot and per-request across the app — DB, models, ingest limits,
+retrieval, budgets, auth, and the scheduler.
+"""
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """All tunables, read from .env / environment at import (see the
+    module-level `settings` instance every module imports)."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://prorag:prorag@localhost:5432/prorag"
@@ -19,6 +28,20 @@ class Settings(BaseSettings):
     reasoning_enabled: bool = False  # OpenRouter reasoning models: think before answering
     answer_model: str = "gpt-4o-mini"
     planner_model: str = "gpt-4o-mini"  # unused until Phase 2's planner exists
+    # Prefill agent (query refinement): a tiny free OpenRouter model that
+    # cleans typos and expands the user's prompt *before* planning, so hybrid
+    # retrieval matches intent. It never adds facts — only rewrites what's
+    # already there — and any failure falls back to the raw prompt.
+    prefill_enabled: bool = True
+    prefill_model: str = "openrouter/google/gemma-4-26b-a4b-it:free"
+    prefill_max_tokens: int = 160
+    prefill_timeout: float = 8.0
+    # OpenRouter key for the direct /embeddings call (llm.py). Lives here so a
+    # .env-only setup works from any shell — pydantic-settings reads .env into
+    # this field but does NOT export it to os.environ, and llm.py used to read
+    # os.environ directly (fine when the key was a real env var, a KeyError
+    # when it was only in .env).
+    openrouter_api_key: str | None = None
 
     blob_dir: str = "./blobs"
 
@@ -37,10 +60,24 @@ class Settings(BaseSettings):
 
     # Phase 2: hybrid + rerank
     rerank_enabled: bool = True
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # "api" = OpenRouter's hosted cross-encoder rerank endpoint
+    # (https://openrouter.ai/api/v1/rerank — real cross-encoder scores,
+    # ~$0.001/call, ~1.5s for 40 chunks); "local" = sentence-transformers
+    # cross-encoder on this machine. API is the default: the free LLM scorer
+    # it replaced was quota-capped (50 req/day) and scored unreliably.
+    rerank_backend: str = "api"
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # local backend only
+    # OpenRouter rerank model (backend "api"). Confirmed live with the
+    # project key: cohere/rerank-v3.5.
+    rerank_api_model: str = "cohere/rerank-v3.5"
+    rerank_api_timeout: float = 20.0
+    # When the API call fails (network, provider outage), degrade to the
+    # local cross-encoder instead of silently skipping the rerank.
+    rerank_api_fallback_to_local: bool = True
     rerank_top_n: int = 40  # fused hits sent into the reranker
     crop_min_docs: int = 3
     crop_max_docs: int = 12
+    crop_max_chunks_per_doc: int = 3  # sections of one PDF all answerable
     crop_score_gap: float = 0.15  # dynamic floor = max(top_score - gap, crop_score_floor)
     crop_score_floor: float = 0.0
     crop_token_budget: int = 6000

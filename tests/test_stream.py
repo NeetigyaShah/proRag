@@ -133,7 +133,7 @@ class _NoopSession:
 
 
 async def _stub_retrieve(_session, _message, user=None):
-    return [
+    hits = [
         {
             "doc_id": uuid.uuid4(),
             "text": "hello world",
@@ -144,6 +144,9 @@ async def _stub_retrieve(_session, _message, user=None):
             "bbox": None,
         }
     ]
+    # cleaned == raw message → no prefill SSE event, budget stays directly
+    # after sources.
+    return hits, _message
 
 
 async def _stub_cap_with_warning(_session, _user=None):

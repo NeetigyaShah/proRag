@@ -170,6 +170,7 @@ async def test_check_rerank_ok_disabled(monkeypatch):
 
 async def test_check_rerank_warns_when_model_fails_to_load(monkeypatch):
     monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_backend", "local")
     name, ok, detail = await doctor.check_rerank(get_model=lambda: None)
     assert (name, ok) == ("rerank", True)
     assert detail.startswith("WARN:")
@@ -177,6 +178,7 @@ async def test_check_rerank_warns_when_model_fails_to_load(monkeypatch):
 
 async def test_check_rerank_warns_on_cpu(monkeypatch):
     monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_backend", "local")
     fake_model = types.SimpleNamespace(device="cpu")
     name, ok, detail = await doctor.check_rerank(get_model=lambda: fake_model)
     assert (name, ok) == ("rerank", True)
@@ -185,6 +187,7 @@ async def test_check_rerank_warns_on_cpu(monkeypatch):
 
 async def test_check_rerank_ok_on_gpu(monkeypatch):
     monkeypatch.setattr(settings, "rerank_enabled", True)
+    monkeypatch.setattr(settings, "rerank_backend", "local")
     fake_model = types.SimpleNamespace(device="cuda:0")
     name, ok, detail = await doctor.check_rerank(get_model=lambda: fake_model)
     assert (name, ok) == ("rerank", True)

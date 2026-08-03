@@ -43,6 +43,10 @@ _locks: dict[uuid.UUID, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def get_lock(connector_id: uuid.UUID) -> asyncio.Lock:
+    """When called: by POST /connectors/{id}/sync and by each scheduler tick,
+    per connector, to serialize runs of the same connector. What: returns the
+    connector's process-lifetime asyncio.Lock, created on first use. Returns:
+    the lock for connector_id."""
     return _locks[connector_id]
 
 
@@ -94,6 +98,10 @@ async def _run_one(connector_id: uuid.UUID, now: datetime) -> None:
 
 
 async def _tick() -> None:
+    """When called: once per scheduler_loop iteration (every
+    min(poll_seconds, 60) seconds while the app is up). What: lists enabled
+    connector ids in one session, then runs each connector sequentially under
+    its lock, skipping any a manual sync currently holds. Returns: None."""
     async with SessionLocal() as session:
         connector_ids = (
             await session.execute(select(Connector.id).where(Connector.enabled.is_(True)))

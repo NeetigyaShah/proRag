@@ -17,6 +17,9 @@ DEFAULT_WINDOW_SIZE = 25
 
 @dataclass
 class TableArtifact:
+    """One synthesized text artifact for a table (summary, markdown row window,
+    or per-row key-value) — each becomes a Chunk row via _store_table()."""
+
     kind: str  # table_summary | table_window | row
     text: str
     row_start: int | None = None  # 0-based row index range this artifact covers
@@ -24,6 +27,9 @@ class TableArtifact:
 
 
 def is_wide_table(columns: list[str]) -> bool:
+    """When called: build_table_artifacts(), per table. What: True when the
+    table exceeds the wide-table column threshold (and so gets per-row
+    key-value chunks instead of markdown row windows)."""
     return len(columns) > WIDE_TABLE_COLUMNS
 
 

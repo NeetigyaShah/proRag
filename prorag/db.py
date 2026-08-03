@@ -1,3 +1,8 @@
+"""Persistence infrastructure: builds the async SQLAlchemy engine and session
+factory, and exposes `get_session`, FastAPI's per-request DB-session
+dependency. Imported at startup and used by every handler that touches the DB.
+"""
+
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -27,5 +32,9 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency (Depends(get_session)): yields one AsyncSession per
+    request; handlers commit/rollback, and the context manager closes it when
+    the request ends."""
+
     async with SessionLocal() as session:
         yield session

@@ -4,6 +4,12 @@ Each arm takes an optional `user` (#18): None keeps today's unfiltered
 behaviour (auth disabled / legacy unscoped key / admin), a real User adds the
 document_acl visibility predicate before LIMIT so ranking and downstream
 fusion/crop only ever see a legal candidate pool.
+
+Runs during every retrieval: operations/retrieval.gather_hits() (shared by
+POST /chat, POST /chat/stream, GET /search and the eval runner) runs the
+vector arm per query embedding and the keyword arm per planner query, plus
+the structured arm when the planner asked for a table, then RRF-fuses the
+arms' hits.
 """
 
 import logging
@@ -32,6 +38,12 @@ def _distance_expr(query_embedding: list[float]):
 async def vector_search(
     session: AsyncSession, query_embedding: list[float], k: int, user: User | None = None
 ) -> list[dict]:
+    """When called: by gather_hits() (operations/retrieval.py) once per
+    planner query embedding, on every answer/search request. What: k-NN
+    cosine search over chunk embeddings joined to ready documents, ACL
+    predicate applied before LIMIT. Returns: best-first hit dicts
+    {chunk_id, doc_id, text, page, bbox, kind, title, score}, where score is
+    cosine similarity (1 - distance)."""
     stmt = (
         select(
             Chunk.id,
@@ -92,6 +104,10 @@ _BM25_AVAILABLE: bool | None = None  # probed once per process
 
 
 async def _bm25_available(session: AsyncSession) -> bool:
+    """When called: by keyword_search() on every keyword lookup; the probe
+    query itself runs only once per process (cached in _BM25_AVAILABLE).
+    What: checks whether the pg_search BM25 index (ix_chunks_bm25) exists.
+    Returns: True/False."""
     global _BM25_AVAILABLE
     if _BM25_AVAILABLE is None:
         row = await session.execute(text("SELECT to_regclass('ix_chunks_bm25') IS NOT NULL"))

@@ -40,6 +40,11 @@ async def ingest(
     collection: str = Form("default"),
     session: AsyncSession = Depends(get_session),
 ):
+    """When called: every POST /ingest request. What: the HTTP trust boundary —
+    suffix allowlist, collection-name validation, and a streaming read capped
+    at the upload size ceiling — then hands the bytes to ingest_bytes() for
+    the parse→chunk→embed→store pipeline. Returns: IngestResponse (202) or an
+    HTTPException for unsupported, oversized, or empty uploads."""
     filename = (file.filename or "upload")[:255]
     if not filename.lower().endswith(ALLOWED_SUFFIXES):
         raise HTTPException(400, f"unsupported file type; allowed: {ALLOWED_SUFFIXES}")

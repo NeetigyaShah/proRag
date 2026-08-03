@@ -20,6 +20,10 @@ import boto3
 
 @dataclass(frozen=True)
 class RemoteObject:
+    """One object from a bucket listing: the key plus the etag+size identity
+    pair that sync.py diffs against connector_items, and last_modified carried
+    for visibility/`since` filtering only."""
+
     key: str
     etag: str
     size: int
@@ -33,6 +37,10 @@ class S3Connector:
     the full listing rather than requested from the API."""
 
     def __init__(self, config: dict):
+        """When called: once per sync run — sync.py's _build_connector()
+        constructs this from the connector row's stored config. What: reads
+        bucket/prefix/credentials and builds the boto3 S3 client (endpoint_url
+        makes AWS/MinIO/R2 all work). Returns: None."""
         self.bucket = config["bucket"]
         self.prefix = config.get("prefix", "")
         self._client = boto3.client(
@@ -44,11 +52,18 @@ class S3Connector:
         )
 
     def _paginate(self) -> Iterator[dict]:
+        """When called: by list_changed and list_all_ids to walk the full
+        bucket+prefix listing. What: pages through list_objects_v2, yielding
+        each object's raw Contents dict. Returns: an iterator of dicts."""
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix):
             yield from page.get("Contents", [])
 
     def list_changed(self, since: datetime | None = None) -> list[RemoteObject]:
+        """When called: by sync_incremental for the incremental poll (and by
+        full_sweep with since=None to list everything). What: lists the full
+        bucket+prefix and applies the `since` filter client-side on
+        last_modified. Returns: the matching RemoteObjects."""
         objs = [
             RemoteObject(key=o["Key"], etag=o["ETag"].strip('"'), size=o["Size"], last_modified=o["LastModified"])
             for o in self._paginate()
@@ -58,8 +73,16 @@ class S3Connector:
         return objs
 
     def list_all_ids(self) -> list[str]:
+        """When called: by callers that need just the full key universe — the
+        sync engine itself uses list_changed; this is exercised by tests.
+        What: lists every object key in the bucket+prefix. Returns: the list
+        of key strings."""
         return [o["Key"] for o in self._paginate()]
 
     def fetch(self, item: RemoteObject) -> bytes:
+        """When called: by sync.py's _process_objects for each new/changed
+        object, run on a worker thread via asyncio.to_thread so the download
+        doesn't stall the event loop. What: downloads the object's full body.
+        Returns: the object bytes."""
         resp = self._client.get_object(Bucket=self.bucket, Key=item.key)
         return resp["Body"].read()

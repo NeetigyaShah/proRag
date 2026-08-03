@@ -42,6 +42,9 @@ OIDC_STATE_COOKIE = "prorag_oidc_state"
 
 
 def _set_session_cookie(response: Response, raw_token: str) -> None:
+    """When called: by login and oidc_callback after minting a session token.
+    What: sets the `prorag_session` cookie (HttpOnly, SameSite=lax, secure
+    per settings, TTL = session_ttl_days) on the response."""
     response.set_cookie(
         SESSION_COOKIE_NAME,
         raw_token,
@@ -54,6 +57,9 @@ def _set_session_cookie(response: Response, raw_token: str) -> None:
 
 
 def _redirect_uri(request: Request) -> str:
+    """When called: by oidc_login and oidc_callback to build the issuer-facing
+    redirect_uri. What: derives it from the incoming request's base URL (so a
+    proxy's X-Forwarded-Proto is honored) plus settings.oidc_redirect_path."""
     # Deliberately built from the request rather than a PUBLIC_BASE_URL
     # setting — #5's research flags this as the #1 OIDC deployment bug behind
     # a proxy that doesn't forward X-Forwarded-Proto. ponytail: fine for the
@@ -63,6 +69,9 @@ def _redirect_uri(request: Request) -> str:
 
 
 async def _discovery(issuer: str) -> dict:
+    """When called: at the start of oidc_login and the code exchange. What:
+    fetches the issuer's OpenID Connect discovery document from the
+    well-known endpoint. Returns: the parsed JSON metadata dict."""
     url = issuer.rstrip("/") + "/.well-known/openid-configuration"
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(url)
@@ -121,12 +130,18 @@ async def _seed_idp_groups(session: AsyncSession, user_id, group_claim: list) ->
 
 
 class LoginRequest(BaseModel):
+    """When called: parsed by FastAPI from the POST /auth/login JSON body.
+    What: carries the local login credentials."""
     email: str
     password: str
 
 
 @router.post("/auth/login")
 async def login(req: LoginRequest, session: AsyncSession = Depends(get_session)):
+    """When called: POST /auth/login with email+password. What: verifies the
+    password against the stored hash (401 for unknown/disabled user or wrong
+    password), then mints a session and sets the cookie. Returns: JSONResponse
+    with the user's email/display_name plus the session cookie."""
     user = (await session.execute(select(User).where(User.email == req.email))).scalar_one_or_none()
     if (
         user is None
@@ -144,6 +159,9 @@ async def login(req: LoginRequest, session: AsyncSession = Depends(get_session))
 
 @router.post("/auth/logout")
 async def logout(request: Request, session: AsyncSession = Depends(get_session)):
+    """When called: POST /auth/logout. What: revokes the session row behind
+    the cookie (if any) and clears the cookie. Returns: JSONResponse {"ok":
+    True}."""
     raw = request.cookies.get(SESSION_COOKIE_NAME)
     if raw:
         row = (
@@ -159,6 +177,10 @@ async def logout(request: Request, session: AsyncSession = Depends(get_session))
 
 @router.get("/auth/oidc/login")
 async def oidc_login(request: Request):
+    """When called: GET /auth/oidc/login. What: starts OIDC — fetches
+    discovery, builds the authorization URL with a fresh nonce, and redirects
+    the browser to the issuer with a state+nonce cookie. Returns:
+    RedirectResponse to the issuer; 404 when OIDC is unconfigured."""
     if not settings.oidc_issuer:
         raise HTTPException(404)
 
@@ -192,6 +214,11 @@ async def oidc_callback(
     state: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
+    """When called: GET {oidc_redirect_path} — the issuer redirects the
+    browser here after the user consents. What: verifies state+nonce against
+    the cookie, exchanges the code for verified claims, upserts the user,
+    seeds idp group membership from the token's `groups` claim, and sets a
+    session cookie. Returns: RedirectResponse to "/"."""
     if not settings.oidc_issuer:
         raise HTTPException(404)
     if not code or not state:

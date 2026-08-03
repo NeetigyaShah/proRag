@@ -21,7 +21,9 @@ import logging
 from pathlib import Path
 
 from prorag.chat.citations import extract_cited_indices, normalize_citations
+from prorag.llm import answer
 from prorag.models import EvalRun
+from prorag.operations.retrieval import SYSTEM_PROMPT, build_prompt, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,9 @@ def aggregate_metrics(per_question: list[dict]) -> dict:
 
 
 def ragas_available() -> bool:
+    """When called: by compute_ragas_metrics before scoring (and by tests).
+    What: probes whether the optional ragas package is importable. Returns:
+    True if ragas is installed, False otherwise."""
     try:
         import ragas  # noqa: F401
     except ImportError:
@@ -135,11 +140,8 @@ async def compute_ragas_metrics(rows: list[dict]) -> dict | None:
 async def run_eval(session, golden_path: str | Path = DEFAULT_GOLDEN_PATH) -> dict:
     """Runs the full retrieve→answer path for every golden entry, scores it,
     persists an `eval_runs` row (per-question JSONB + aggregate), and returns
-    the aggregate dict. Imports the chat retrieval path lazily to avoid a
-    circular import (chat.router -> eval.runner would be the wrong direction)."""
-    from prorag.chat.router import SYSTEM_PROMPT, build_prompt, retrieve
-    from prorag.llm import answer
-
+    the aggregate dict. Retrieval + prompt building come from the operations
+    layer (prorag/operations/retrieval.py), the same path /chat uses."""
     golden = load_golden(golden_path)
     per_question: list[dict] = []
     ragas_rows: list[dict] = []
@@ -147,8 +149,8 @@ async def run_eval(session, golden_path: str | Path = DEFAULT_GOLDEN_PATH) -> di
     for entry in golden:
         # user=None (default): the eval runner is #3's service-user, scored
         # against the full corpus, not a real principal's filtered view (#18).
-        hits = await retrieve(session, entry["question"])
-        user_prompt = build_prompt(entry["question"], hits)
+        hits, cleaned = await retrieve(session, entry["question"])
+        user_prompt = build_prompt(cleaned, hits)
         raw_answer = await answer(SYSTEM_PROMPT, user_prompt, session=session)
 
         per_question.append(

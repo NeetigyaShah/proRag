@@ -75,6 +75,10 @@ async def resolve_session_token(raw_token: str, session: AsyncSession) -> Sessio
 
 
 async def _session_from_cookie(request: Request, session: AsyncSession) -> Session | None:
+    """When called: by require_auth and current_user to resolve the caller's
+    identity. What: reads the `prorag_session` cookie and resolves it to a
+    live Session row. Returns: the Session, or None when the cookie is
+    absent/unknown/expired/revoked."""
     raw = request.cookies.get(SESSION_COOKIE_NAME)
     if not raw:
         return None
@@ -82,6 +86,10 @@ async def _session_from_cookie(request: Request, session: AsyncSession) -> Sessi
 
 
 async def _api_key_from_header(request: Request, session: AsyncSession) -> ApiKey | None:
+    """When called: by require_api_key and current_user to resolve a bearer
+    credential. What: parses the `Authorization: Bearer` header and looks the
+    key up by its hash. Returns: the ApiKey row, or None when the header is
+    absent or the key is unknown."""
     header = request.headers.get("authorization", "")
     if not header.startswith("Bearer "):
         return None

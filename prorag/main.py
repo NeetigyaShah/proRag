@@ -1,3 +1,8 @@
+"""App composition root: builds the FastAPI app, wires middleware, mounts
+every router (all but /auth behind the auth dependency), serves the static web
+viewer, and runs the lifespan (scheduler loop + engine dispose). Runs once at
+server startup."""
+
 import asyncio
 import contextlib
 import logging
@@ -34,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """FastAPI lifespan: on startup, launches the connector scheduler loop
+    (#23) when enabled; on shutdown, cancels it and disposes the engine's
+    pooled connections so the worker drains cleanly."""
+
     # #23: one background task drives every enabled connector's incremental
     # poll / mandatory sweep (#15). Guarded by a setting so tests and
     # single-shot scripts that import the app don't spin up a loop they
@@ -49,6 +58,8 @@ async def lifespan(_app: FastAPI):
     await engine.dispose()
 
 
+# Composition root: all router/dependency wiring happens here, not in the
+# routers themselves.
 app = FastAPI(title="ProRag", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(RequestTimingMiddleware)

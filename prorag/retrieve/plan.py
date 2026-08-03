@@ -10,6 +10,10 @@ Parsing is defensive on purpose: planner output is LLM JSON, which means code
 fences, stray prose, or occasional garbage. A parse failure must never fail
 the request — it falls back to running the raw user query verbatim as both
 queries.
+
+Runs once per answer or search request — operations/retrieval.retrieve() (POST
+/chat, POST /chat/stream, /eval/run) and retrieve/router.py's GET /search both
+call plan() first, before embedding or any retrieval arm.
 """
 
 import json
@@ -43,6 +47,10 @@ sums, rows of a table), in which case it is "table".
 
 
 def _extract_json(raw: str) -> dict:
+    """When called: by plan() after each planner LLM call. What: strips
+    ```json / ``` code fences the model may have added, then parses the text
+    as JSON. Returns: the parsed dict — raises json.JSONDecodeError on
+    garbage, which plan() catches and turns into the fallback plan."""
     text = raw.strip()
     # strip ```json ... ``` or ``` ... ``` fences if the model added them anyway
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
@@ -52,6 +60,9 @@ def _extract_json(raw: str) -> dict:
 
 
 def _fallback(query: str) -> dict:
+    """When called: by plan() whenever the planner call or its JSON parsing
+    fails. What: builds the degraded plan that runs the raw query verbatim.
+    Returns: {"search_needed": True, "queries": [query, query], "mode": "default"}."""
     return {"search_needed": True, "queries": [query, query], "mode": "default"}
 
 

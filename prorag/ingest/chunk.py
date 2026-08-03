@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Chunk:
+    """One fixed-window chunk from chunk_pages(): the plain text plus the page
+    span it was cut from (used for citation page anchors)."""
+
     ord: int
     text: str
     page_start: int
@@ -91,6 +94,10 @@ class Element:
 
 @dataclass
 class StructuredChunk:
+    """One chunk from chunk_elements(): raw text, embed_text with the heading
+    breadcrumb prepended, the page span, and the union bbox used for citation
+    highlighting."""
+
     ord: int
     text: str
     embed_text: str
@@ -106,6 +113,9 @@ def _heading_key(heading_path: list[str]) -> tuple:
 
 
 def _union_bbox(boxes: list[tuple[float, float, float, float]]) -> list[float] | None:
+    """When called: chunk_elements(), once per chunk window. What: tight
+    bounding box around every element box in the window. Returns: [x0, y0,
+    x1, y1], or None when no element carries a bbox."""
     if not boxes:
         return None
     x0 = min(b[0] for b in boxes)
@@ -116,6 +126,9 @@ def _union_bbox(boxes: list[tuple[float, float, float, float]]) -> list[float] |
 
 
 def breadcrumb(heading_path: list[str]) -> str:
+    """When called: chunk_elements(), once per chunk, to build embed_text.
+    What: renders the heading path as a '#'-prefixed breadcrumb, '' when there
+    is no heading. Returns: the breadcrumb string."""
     if not heading_path:
         return ""
     return "# " + " > ".join(heading_path)

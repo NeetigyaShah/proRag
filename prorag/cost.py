@@ -15,6 +15,10 @@ from prorag.settings import settings
 
 
 def compute_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """When called: by track_usage() for every planner/answer/embedding call.
+    What: prices a call via litellm.completion_cost() when the model is known
+    to litellm, else the flat per-1k-token settings.fallback_price_per_1k_usd.
+    Returns: the cost in USD."""
     try:
         cost = litellm.completion_cost(model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
         if cost is not None:

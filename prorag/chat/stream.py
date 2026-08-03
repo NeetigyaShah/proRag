@@ -22,10 +22,18 @@ TRUNCATION_NOTICE = "\n\n_[response truncated: repeated whitespace]_"
 
 
 def sse_event(event: str, data: dict | list) -> str:
+    """When called: by chat/router.py's /chat/stream generator for every SSE
+    frame it emits — sources, token, citation, budget, meta, error, done.
+    What: frames an event in text/event-stream format with JSON-encoded data.
+    Returns: the raw "event: <name>\ndata: <json>\n\n" payload string."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 def sse_retry(ms: int = 3000) -> str:
+    """When called: once at the top of the /chat/stream response, before any
+    event, telling the browser how long to wait before reconnecting after a
+    dropped connection. What: emits the SSE retry directive. Returns: the
+    "retry: <ms>\n\n" frame string."""
     return f"retry: {ms}\n\n"
 
 
@@ -45,6 +53,13 @@ class TokenGuard:
         self.done = False  # True once the whitespace-runaway guard fired
 
     def feed(self, token: str) -> str:
+        """When called: once per raw text delta from the LLM stream, in order,
+        by chat/router.py's stream loop. What: holds a line while it looks
+        like an in-progress markdown table row (flushed whole at its '\n'),
+        and truncates the stream with a notice after 200 consecutive
+        whitespace chars; anything else is emitted immediately. Returns: the
+        substring of `token` safe to flush now ("" when all of it is still
+        buffered)."""
         if self.done or not token:
             return ""
         out = []

@@ -26,7 +26,10 @@ _PROVIDER_KEY_ENVVARS = ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_
 
 
 def _has_provider_key() -> bool:
-    return any(os.environ.get(k) for k in _PROVIDER_KEY_ENVVARS)
+    # os.environ first (real env vars), then the settings field — a key that
+    # lives only in .env is visible to Settings but NOT to os.environ, and the
+    # app must not report "no provider key" for a configured provider.
+    return any(os.environ.get(k) for k in _PROVIDER_KEY_ENVVARS) or bool(settings.openrouter_api_key)
 
 
 def _label(ok: bool, detail: str) -> str:
@@ -53,6 +56,9 @@ def check_settings(cfg=None) -> tuple[str, bool, str]:
 
 
 async def check_db(probe=None, timeout: float = 5.0) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests with an injected
+    probe). What: runs a trivial SELECT 1 against the app's DB engine.
+    Returns: ("db", ok, detail) — FAIL when the connection errors."""
     async def _default_probe() -> None:
         async with db.engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -67,6 +73,9 @@ async def check_db(probe=None, timeout: float = 5.0) -> tuple[str, bool, str]:
 
 
 def _script_head() -> str:
+    """When called: by check_migrations. What: reads the alembic revision the
+    code expects — the head of the local alembic scripts directory. Returns:
+    the revision id string."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -76,6 +85,9 @@ def _script_head() -> str:
 
 
 async def check_migrations(probe=None, head=None, timeout: float = 5.0) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests with an injected
+    probe). What: compares the DB's alembic_version to the expected head.
+    Returns: ("migrations", ok, detail) — FAIL on drift or probe error."""
     async def _default_probe() -> str | None:
         async with db.engine.connect() as conn:
             result = await conn.execute(text("SELECT version_num FROM alembic_version"))
@@ -94,6 +106,9 @@ async def check_migrations(probe=None, head=None, timeout: float = 5.0) -> tuple
 
 
 def check_blob_dir(blob_dir: str | None = None) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests). What: ensures the
+    blob directory exists and is writable via a write+delete probe. Returns:
+    ("blob_dir", ok, detail) — FAIL on any OSError."""
     path = Path(blob_dir if blob_dir is not None else settings.blob_dir)
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -105,7 +120,14 @@ def check_blob_dir(blob_dir: str | None = None) -> tuple[str, bool, str]:
         return ("blob_dir", False, f"not writable ({path}): {exc}")
 
 
-async def check_llm(ping=None, has_key: bool | None = None, timeout: float = 5.0) -> tuple[str, bool, str]:
+async def check_llm(ping=None, has_key: bool | None = None, timeout: float = 20.0) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests with an injected
+    ping). What: sends a 1-token completion to settings.answer_model to prove
+    the provider is reachable. Returns: ("llm", ok, detail) — WARN (ok) when
+    no provider key is set, FAIL when the ping errors. Default timeout is 20s
+    deliberately: litellm's FIRST call in a cold process does provider
+    init (cost table, model info) that a 5s cap reliably trips — measured
+    ~6-10s cold, ~1s warm."""
     has_key = _has_provider_key() if has_key is None else has_key
     if not has_key:
         return ("llm", True, "WARN: skipped — no provider API key set")
@@ -129,6 +151,10 @@ async def check_llm(ping=None, has_key: bool | None = None, timeout: float = 5.0
 
 
 async def check_embed(embed=None, has_key: bool | None = None, timeout: float = 5.0) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests with an injected
+    embed). What: embeds a single "ping" and verifies the returned dimension
+    matches EMBED_DIM. Returns: ("embed", ok, detail) — WARN (ok) when no key
+    and no local model, FAIL on error or dimension mismatch."""
     has_key = (_has_provider_key() or settings.embed_model.startswith("local/")) if has_key is None else has_key
     if not has_key:
         return ("embed", True, "WARN: skipped — no provider API key set")
@@ -151,8 +177,40 @@ async def check_embed(embed=None, has_key: bool | None = None, timeout: float = 
 
 
 async def check_rerank(get_model=None, timeout: float = 30.0) -> tuple[str, bool, str]:
+    """When called: by run_all(). What: verifies the CONFIGURED rerank
+    backend — a live 2-doc probe of OpenRouter's rerank endpoint for
+    backend="api", else loads the local model and reports where it landed.
+    Returns: ("rerank", ok, detail) — always ok: "disabled" when reranking
+    is off, WARN for CPU or unloadable (reranking degrades gracefully, #11)."""
     if not settings.rerank_enabled:
         return ("rerank", True, "disabled")
+
+    if settings.rerank_backend == "api":
+        api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            return ("rerank", True, "WARN: OPENROUTER_API_KEY unset — rerank API unavailable")
+        try:
+            async with asyncio.timeout(timeout):
+                import httpx
+
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        "https://openrouter.ai/api/v1/rerank",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={
+                            "model": settings.rerank_api_model,
+                            "query": "doctor probe",
+                            "documents": ["doctor probe chunk"],
+                        },
+                    )
+                    resp.raise_for_status()
+            return (
+                "rerank",
+                True,
+                f"api ok ({settings.rerank_api_model}, {resp.json().get('model', '?')})",
+            )
+        except Exception as exc:
+            return ("rerank", True, f"WARN: rerank API probe failed ({exc})")
 
     if get_model is None:
         from prorag.retrieve.rerank import get_model as _get_model
@@ -173,6 +231,10 @@ async def check_rerank(get_model=None, timeout: float = 30.0) -> tuple[str, bool
 
 
 async def check_bm25(probe=None, timeout: float = 5.0) -> tuple[str, bool, str]:
+    """When called: by run_all() (and directly by tests with an injected
+    probe). What: checks whether the pg_search BM25 index exists. Returns:
+    ("bm25", ok, detail) — WARN (ok) when absent, since the tsvector fallback
+    keeps search working."""
     async def _default_probe() -> bool:
         async with db.engine.connect() as conn:
             result = await conn.execute(text("SELECT to_regclass('ix_chunks_bm25') IS NOT NULL"))
@@ -211,6 +273,9 @@ async def run_all(*, llm_has_key: bool | None = None, embed_has_key: bool | None
 
 
 async def _main() -> int:
+    """When called: `python -m prorag.doctor`. What: runs every check, prints
+    one aligned OK/WARN/FAIL line per check, and disposes the DB engine.
+    Returns: exit code 1 if any check FAILed, else 0."""
     try:
         results = await run_all()
     finally:
