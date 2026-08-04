@@ -14,11 +14,12 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 from prorag.ingest.chunk import Element
+from prorag.settings import settings
 
 # Probe WITHOUT importing: `import docling` pulls torch, which costs ~30-75s
 # of process start on this machine. find_spec only checks the package exists;
 # the real import happens once, lazily, inside _get_docling_converter() on the
-# first docling parse — same idiom as llm.py's local embedder.
+# first docling parse — same lazy-singleton idiom as llm.py's embedder paths.
 DOCLING_AVAILABLE = importlib.util.find_spec("docling") is not None
 
 
@@ -98,10 +99,6 @@ DOCLING_MIMES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
-    "image/png",
-    "image/jpeg",
-    "image/tiff",
-    "image/webp",
 }
 
 STRUCTURED_MIMES = {
@@ -125,15 +122,14 @@ def _make_docling_converter():
     - do_ocr=False — digital PDFs have a text layer; OCR is pure memory cost
     - images_scale=1.0 — the default 2.0 quadruples pixel memory per page
     - picture/table image generation off (nothing here consumes those)
+
+    Scanned PDFs and raster uploads never reach this converter: they are
+    OCR'd via the OpenRouter vision API (ocr_pages) and take the plain-text
+    chunk path instead (core.py).
     """
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import (
-        AcceleratorOptions,
-        PdfPipelineOptions,
-        RapidOcrOptions,
-        ThreadedPdfPipelineOptions,
-    )
-    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
+    from docling.datamodel.pipeline_options import AcceleratorOptions, ThreadedPdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
 
     opts = ThreadedPdfPipelineOptions(
@@ -148,45 +144,12 @@ def _make_docling_converter():
     opts.generate_picture_images = False
     opts.generate_table_images = False
 
-    # Raster uploads (scanned pages, photos) and image-only PDFs have no text
-    # layer — OCR is mandatory. Kept as a SECOND lazy converter: the default
-    # PDF pipeline keeps do_ocr=False (memory; measured OOM history above).
-    img_opts = PdfPipelineOptions()
-    img_opts.do_ocr = True
-    img_opts.ocr_options = RapidOcrOptions()
-    img_opts.images_scale = 1.0
-
     return DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(
                 pipeline_cls=ThreadedStandardPdfPipeline,
                 pipeline_options=opts,
-            ),
-            InputFormat.IMAGE: ImageFormatOption(pipeline_options=img_opts),
-        }
-    )
-
-
-def _make_docling_ocr_converter():
-    """Converter for image-only documents: PDFs with no text layer and raster
-    uploads. Same memory tuning as _make_docling_converter, but with OCR
-    enabled (rapidocr)."""
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import (
-        PdfPipelineOptions,
-        RapidOcrOptions,
-    )
-    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
-
-    opts = PdfPipelineOptions()
-    opts.do_ocr = True
-    opts.ocr_options = RapidOcrOptions()
-    opts.images_scale = 1.0
-
-    return DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=opts),
-            InputFormat.IMAGE: ImageFormatOption(pipeline_options=opts),
+            )
         }
     )
 
@@ -195,10 +158,10 @@ _docling_converter = None
 
 
 def _get_docling_converter():
-    """Lazy singleton, same idiom as llm.py's local embedder: the pipeline
-    holds ~100MB of layout-model weights; rebuilding it per ingest request
-    would reload them every time. Imports docling here (first call only) so
-    process startup and the test suite never pay torch's import cost."""
+    """Lazy singleton: the pipeline holds ~100MB of layout-model weights;
+    rebuilding it per ingest request would reload them every time. Imports
+    docling here (first call only) so process startup and the test suite
+    never pay torch's import cost."""
     global _docling_converter
     if _docling_converter is None:
         if not DOCLING_AVAILABLE:
@@ -207,25 +170,27 @@ def _get_docling_converter():
     return _docling_converter
 
 
-_docling_ocr_converter = None
+def _pdf_page_count(data: bytes, mime: str) -> int:
+    """Page count for OCR routing: 1 for raster uploads, the PDF's real page
+    count otherwise (a scan may be many pages)."""
+    if mime != "application/pdf":
+        return 1
+    try:
+        import fitz
 
-
-def _get_docling_ocr_converter():
-    """Second lazy singleton: OCR-enabled pipeline for image-only documents
-    (raster uploads, scanned PDFs). Loaded only when such a file arrives —
-    digital PDFs keep the memory-tuned no-OCR converter."""
-    global _docling_ocr_converter
-    if _docling_ocr_converter is None:
-        if not DOCLING_AVAILABLE:
-            raise ImportError("docling not installed; PyMuPDF fallback is active")
-        _docling_ocr_converter = _make_docling_ocr_converter()
-    return _docling_ocr_converter
+        doc = fitz.open(stream=data, filetype="pdf")
+        try:
+            return doc.page_count
+        finally:
+            doc.close()
+    except Exception:
+        return 1
 
 
 def _pdf_has_text_layer(data: bytes) -> bool:
     """Cheap text-layer probe for PDFs: PyMuPDF's get_text per page. A scan
-    renders glyphs but has no text layer — those must go through the OCR
-    pipeline, while digital PDFs keep the faster no-OCR path."""
+    renders glyphs but has no text layer — those go through the OpenRouter
+    OCR path, while digital PDFs keep docling's no-OCR pipeline."""
     try:
         import fitz
 
@@ -236,6 +201,73 @@ def _pdf_has_text_layer(data: bytes) -> bool:
             doc.close()
     except Exception:
         return True  # probe failed — assume digital, let the parse decide
+
+
+def _render_png(data: bytes, mime: str, page_no: int) -> bytes:
+    """Render one page as PNG bytes for the vision OCR call: page `page_no`
+    (1-based) of a PDF via PyMuPDF, or the image itself via Pillow."""
+    if mime == "application/pdf":
+        import fitz
+
+        doc = fitz.open(stream=data, filetype="pdf")
+        try:
+            page = doc[page_no - 1]
+            pix = page.get_pixmap(dpi=200)
+            return pix.tobytes("png")
+        finally:
+            doc.close()
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(BytesIO(data))
+    img.load()
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def ocr_pages(data: bytes, mime: str, page_count: int) -> list[str]:
+    """OCR a scanned PDF or raster upload via a paid OpenRouter vision model
+    (settings.ocr_model). One API call per page: render the page to PNG,
+    ask the model to transcribe all text exactly. No local OCR engine — the
+    laptop stays cold. Returns per-page plain text; raises on any failure
+    (the caller rejects the upload rather than ingesting binary garbage)."""
+    import base64
+
+    import httpx
+
+    api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set — OCR needs it (set it in .env)")
+
+    prompt = "Transcribe ALL text in this image exactly as written. Preserve line breaks and section order. Output only the transcribed text, no commentary."
+    pages: list[str] = []
+    async with httpx.AsyncClient(timeout=settings.ocr_timeout) as client:
+        for page_no in range(1, page_count + 1):
+            png = _render_png(data, mime, page_no)
+            b64 = base64.b64encode(png).decode()
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": settings.ocr_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                            ],
+                        }
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            pages.append(resp.json()["choices"][0]["message"]["content"] or "")
+    return pages
 
 
 def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument | None:
@@ -251,12 +283,6 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
             f.write(data)
             tmp_path = f.name
         converter = _get_docling_converter()
-        if mime == "application/pdf" and not _pdf_has_text_layer(data):
-            # Scanned PDF: no text layer — OCR it instead of returning zero
-            # text and failing the ingest (or silently producing nothing).
-            converter = _get_docling_ocr_converter()
-        elif mime.startswith("image/"):
-            converter = _get_docling_ocr_converter()
         result = converter.convert(tmp_path)
         dl_doc = result.document
 

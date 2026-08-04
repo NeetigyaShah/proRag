@@ -4,7 +4,7 @@ FAIL. WARN covers things that degrade gracefully at runtime (no LLM key set,
 reranker stuck on CPU) rather than genuinely broken deployments.
 
 Each check_x() returns (name, ok, detail) and is independently importable —
-network-touching checks take an injectable stub (`probe=`/`ping=`/`get_model=`)
+network-touching checks take an injectable stub (`probe=`/`ping=`/`embed=`)
 so tests can exercise the pass/fail branches with no network, per the pattern
 already used for /readyz's fake sessions in tests/test_ops.py. WARN is spelled
 as an `ok=True` result whose detail starts with "WARN: "; the tuple has no
@@ -176,58 +176,39 @@ async def check_embed(embed=None, has_key: bool | None = None, timeout: float = 
     return ("embed", True, f"reachable, dim {dim} matches EMBED_DIM ({settings.embed_model})")
 
 
-async def check_rerank(get_model=None, timeout: float = 30.0) -> tuple[str, bool, str]:
-    """When called: by run_all(). What: verifies the CONFIGURED rerank
-    backend — a live 2-doc probe of OpenRouter's rerank endpoint for
-    backend="api", else loads the local model and reports where it landed.
-    Returns: ("rerank", ok, detail) — always ok: "disabled" when reranking
-    is off, WARN for CPU or unloadable (reranking degrades gracefully, #11)."""
+async def check_rerank(timeout: float = 30.0) -> tuple[str, bool, str]:
+    """When called: by run_all(). What: verifies the configured rerank
+    backend with a live 2-doc probe of OpenRouter's rerank endpoint. Returns:
+    ("rerank", ok, detail) — always ok: "disabled" when reranking is off,
+    WARN when the probe fails (reranking degrades gracefully)."""
     if not settings.rerank_enabled:
         return ("rerank", True, "disabled")
 
-    if settings.rerank_backend == "api":
-        api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            return ("rerank", True, "WARN: OPENROUTER_API_KEY unset — rerank API unavailable")
-        try:
-            async with asyncio.timeout(timeout):
-                import httpx
-
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        "https://openrouter.ai/api/v1/rerank",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={
-                            "model": settings.rerank_api_model,
-                            "query": "doctor probe",
-                            "documents": ["doctor probe chunk"],
-                        },
-                    )
-                    resp.raise_for_status()
-            return (
-                "rerank",
-                True,
-                f"api ok ({settings.rerank_api_model}, {resp.json().get('model', '?')})",
-            )
-        except Exception as exc:
-            return ("rerank", True, f"WARN: rerank API probe failed ({exc})")
-
-    if get_model is None:
-        from prorag.retrieve.rerank import get_model as _get_model
-    else:
-        _get_model = get_model
-
+    api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        return ("rerank", True, "WARN: OPENROUTER_API_KEY unset — rerank API unavailable")
     try:
         async with asyncio.timeout(timeout):
-            model = await asyncio.to_thread(_get_model)
+            import httpx
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/rerank",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": settings.rerank_api_model,
+                        "query": "doctor probe",
+                        "documents": ["doctor probe chunk"],
+                    },
+                )
+                resp.raise_for_status()
+        return (
+            "rerank",
+            True,
+            f"api ok ({settings.rerank_api_model}, {resp.json().get('model', '?')})",
+        )
     except Exception as exc:
-        return ("rerank", True, f"WARN: could not load {settings.rerank_model} — reranking will no-op ({exc})")
-    if model is None:
-        return ("rerank", True, f"WARN: could not load {settings.rerank_model} — reranking will no-op")
-    device = str(getattr(model, "device", "cpu"))
-    if "cpu" in device.lower():
-        return ("rerank", True, f"WARN: loaded on CPU ({settings.rerank_model}) — reranking will be slow (#11)")
-    return ("rerank", True, f"loaded on {device} ({settings.rerank_model})")
+        return ("rerank", True, f"WARN: rerank API probe failed ({exc})")
 
 
 async def check_bm25(probe=None, timeout: float = 5.0) -> tuple[str, bool, str]:

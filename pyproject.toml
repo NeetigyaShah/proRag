@@ -14,7 +14,6 @@ dependencies = [
     "pymupdf>=1.24",
     "pydantic-settings>=2.4",
     "python-multipart>=0.0.9",
-    "sentence-transformers>=3.0",
     "argon2-cffi>=23.1",
     "authlib>=1.3",
     "httpx>=0.27",
@@ -25,8 +24,6 @@ dependencies = [
     # must work out of the box; parse.py still degrades to PyMuPDF if the
     # import ever fails.
     "docling>=2.117",
-    # OCR engine for scanned PDFs and image uploads (rapidocr, via docling).
-    "onnxruntime>=1.17",
 ]
 
 [project.optional-dependencies]

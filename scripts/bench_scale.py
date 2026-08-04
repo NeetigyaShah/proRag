@@ -428,51 +428,36 @@ async def cmd_ingest() -> None:
 
 
 async def cmd_rerank() -> None:
-    """Loads the CrossEncoder directly (bypassing settings.rerank_enabled,
-    which is False in this .env) so we can report whether weights are
-    reachable at all. Runs predict() twice -- cold (includes any lazy
-    backend init) and warm -- since the first call is not representative of
-    steady-state per-request cost."""
-    import os
+    """Times one OpenRouter hosted rerank call for TOP_K docs and reports
+    the billed cost — the local CrossEncoder bench is gone (no offline
+    models; laptop thermals)."""
+    import httpx
 
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    try:
-        from sentence_transformers import CrossEncoder
-    except ImportError:
-        print("rerank: sentence-transformers not installed; skipping")
+    api_key = settings.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("rerank: OPENROUTER_API_KEY unset; skipping")
         return
-
     rng = random.Random(3)
-    try:
-        t0 = time.time()
-        try:
-            model = CrossEncoder(settings.rerank_model, backend="onnx")
-        except Exception:
-            model = CrossEncoder(settings.rerank_model)
-        load_s = time.time() - t0
-    except Exception as exc:
-        print(f"rerank: could not load {settings.rerank_model}: {type(exc).__name__}: {exc}")
-        return
-
     texts = [_random_paragraph(rng, 200) for _ in range(TOP_K)]
-    pairs = [("fire drill frequency requirement", t) for t in texts]
-
     t0 = time.time()
-    model.predict(pairs)
-    cold_s = time.time() - t0
-
-    t0 = time.time()
-    model.predict(pairs)
-    warm_s = time.time() - t0
-
-    max_concurrent_before_queue = 1  # single-thread executor, hard ceiling regardless of pool size
-    print(f"rerank: loaded in {load_s:.1f}s, single query (40 hits) cold={cold_s:.2f}s warm={warm_s:.2f}s")
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://openrouter.ai/api/v1/rerank",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": settings.rerank_api_model,
+                "query": "fire drill frequency requirement",
+                "documents": texts,
+            },
+        )
+        resp.raise_for_status()
+        usage = resp.json().get("usage", {})
+    s = time.time() - t0
+    print(f"rerank: {settings.rerank_api_model} {TOP_K} docs in {s:.2f}s, usage={usage}")
     print("RESULT_JSON", __import__("json").dumps({
         "loaded": True,
-        "load_s": load_s,
-        "single_query_40hits_cold_s": cold_s,
-        "single_query_40hits_warm_s": warm_s,
-        "max_concurrent_chats_before_queueing": max_concurrent_before_queue,
+        "single_query_40hits_s": s,
+        "usage": usage,
     }))
 
 

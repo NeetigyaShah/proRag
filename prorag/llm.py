@@ -49,20 +49,6 @@ def estimate_tokens(model: str, text: str) -> int:
         return len(text.split())
 
 
-_local_embedder = None
-
-
-def _get_local_embedder(model_name: str):
-    """Free local embeddings (EMBED_MODEL=local/<hf-model>) — needed because
-    OpenRouter has no embeddings API. Lazy singleton, CPU."""
-    global _local_embedder
-    if _local_embedder is None:
-        from sentence_transformers import SentenceTransformer
-
-        _local_embedder = SentenceTransformer(model_name)
-    return _local_embedder
-
-
 async def embed_texts_batched(texts: list[str], session=None) -> list[list[float]]:
     """Embed in bounded batches with bounded concurrency, preserving order.
 
@@ -94,7 +80,7 @@ async def embed_texts(texts: list[str], session=None, user_id=None) -> list[list
     (operations/retrieval.py), GET /search (retrieve/router.py), rule
     preview/confirm (admin/router.py), doctor's check_embed, and
     embed_texts_batched(). What: embeds all texts via the configured
-    embed_model (OpenRouter direct call, local sentence-transformers, or
+    embed_model (OpenRouter direct call for openrouter-embed/* models, or
     litellm) and records usage when a session is given. Returns: one vector
     per input text, in order."""
     if not texts:
@@ -122,14 +108,6 @@ async def embed_texts(texts: list[str], session=None, user_id=None) -> list[list
             resp.raise_for_status()
             data = resp.json()["data"]
         return [item["embedding"] for item in data]
-    if settings.embed_model.startswith("local/"):
-        import asyncio
-
-        model = _get_local_embedder(settings.embed_model.removeprefix("local/"))
-        vectors = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: model.encode(texts, normalize_embeddings=True)
-        )
-        return [v.tolist() for v in vectors]
     resp = await litellm.aembedding(model=settings.embed_model, input=texts)
     prompt_tokens, completion_tokens = _usage_tokens(resp)
     track_usage(session, settings.embed_model, prompt_tokens, completion_tokens, user_id=user_id)

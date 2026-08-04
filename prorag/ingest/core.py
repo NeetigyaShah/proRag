@@ -27,7 +27,10 @@ from prorag.ingest.parse import (
     DOCLING_MIMES,
     STRUCTURED_MIMES,
     ParsedTable,
+    _pdf_has_text_layer,
+    _pdf_page_count,
     guess_mime,
+    ocr_pages,
     parse_structured,
     parse_to_pages,
     sniff_mime,
@@ -51,6 +54,10 @@ _TRANSIENT_ERROR_MARKERS = (
     "rate limit",
     "ratelimit",
     "429",
+    # OpenRouter free-tier embed models report overload as 422 Unprocessable —
+    # retrying genuinely helps (verified: HTTP-level retries succeed).
+    "422",
+    "unprocessable",
     "500",
     "502",
     "503",
@@ -233,6 +240,16 @@ async def ingest_bytes(
         if mime in STRUCTURED_MIMES:
             parser_used = "pandas"
             parsed_tables = parse_structured(data, mime)
+        elif mime.startswith("image/") or (
+            mime == "application/pdf" and not _pdf_has_text_layer(data)
+        ):
+            # Raster uploads and scanned PDFs: transcribe via the OpenRouter
+            # vision model (no local OCR), then take the plain-text chunk
+            # path. No bboxes — citations open the page without highlight.
+            parser_used = "ocr"
+            pages = await ocr_pages(data, mime, _pdf_page_count(data, mime))
+            prose_chunks = chunk_pages(pages, settings.chunk_target_tokens, settings.chunk_overlap_tokens)
+            page_count = len(pages)
         elif mime in DOCLING_MIMES:
             docling_doc = try_docling_parse(data, mime, filename)
             if docling_doc is not None:

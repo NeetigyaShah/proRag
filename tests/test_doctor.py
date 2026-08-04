@@ -1,5 +1,5 @@
 """Unit tests for `prorag doctor`'s check functions (#20) — every check takes
-an injectable stub (`probe=`/`ping=`/`embed=`/`get_model=`) so these exercise
+an injectable stub (`probe=`/`ping=`/`embed=`) so these exercise
 every OK/WARN/FAIL branch with no network and no DB, mirroring the fake-session
 pattern already used for /readyz in tests/test_ops.py.
 
@@ -168,30 +168,13 @@ async def test_check_rerank_ok_disabled(monkeypatch):
     assert (name, ok, detail) == ("rerank", True, "disabled")
 
 
-async def test_check_rerank_warns_when_model_fails_to_load(monkeypatch):
+async def test_check_rerank_warns_without_key(monkeypatch):
     monkeypatch.setattr(settings, "rerank_enabled", True)
-    monkeypatch.setattr(settings, "rerank_backend", "local")
-    name, ok, detail = await doctor.check_rerank(get_model=lambda: None)
+    monkeypatch.setattr(settings, "openrouter_api_key", None)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    name, ok, detail = await doctor.check_rerank()
     assert (name, ok) == ("rerank", True)
     assert detail.startswith("WARN:")
-
-
-async def test_check_rerank_warns_on_cpu(monkeypatch):
-    monkeypatch.setattr(settings, "rerank_enabled", True)
-    monkeypatch.setattr(settings, "rerank_backend", "local")
-    fake_model = types.SimpleNamespace(device="cpu")
-    name, ok, detail = await doctor.check_rerank(get_model=lambda: fake_model)
-    assert (name, ok) == ("rerank", True)
-    assert "CPU" in detail and detail.startswith("WARN:")
-
-
-async def test_check_rerank_ok_on_gpu(monkeypatch):
-    monkeypatch.setattr(settings, "rerank_enabled", True)
-    monkeypatch.setattr(settings, "rerank_backend", "local")
-    fake_model = types.SimpleNamespace(device="cuda:0")
-    name, ok, detail = await doctor.check_rerank(get_model=lambda: fake_model)
-    assert (name, ok) == ("rerank", True)
-    assert not detail.startswith("WARN:")
 
 
 # ---- check_bm25 ---------------------------------------------------------------

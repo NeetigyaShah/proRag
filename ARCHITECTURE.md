@@ -434,7 +434,7 @@ argon2; bootstrap via `scripts/create_admin.py`.
 │  │  ├─ arms.py                 # vector (halfvec cast) / BM25 / fts fallback / structured SQL
 │  │  ├─ visibility.py           # visibility_clause() + visible_doc_guard() — the ACL predicate
 │  │  ├─ fuse.py                 # RRF
-│  │  ├─ rerank.py               # OpenRouter hosted cross-encoder (api) / ONNX local fallback
+│  │  ├─ rerank.py               # OpenRouter hosted cross-encoder + flatness guard
 │  │  └─ crop.py                 # adaptive crop, revision dedup, neighbour expansion
 │  ├─ chat/
 │  │  ├─ router.py               # /chat, /chat/stream, /feedback — HTTP only; ops in operations/

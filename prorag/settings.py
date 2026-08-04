@@ -45,6 +45,11 @@ class Settings(BaseSettings):
 
     blob_dir: str = "./blobs"
 
+    # OCR for scanned PDFs and image uploads: a paid OpenRouter vision model.
+    # ~$0.0005/page on gemini-2.5-flash; no local OCR engine (laptop thermals).
+    ocr_model: str = "google/gemini-2.5-flash"
+    ocr_timeout: float = 120.0
+
     # Ingestion limits — ceilings so one pathological upload can't exhaust the
     # process. Tune per deployment; these suit a single-box side project.
     max_upload_bytes: int = 100 * 1024 * 1024  # 100 MB
@@ -60,20 +65,12 @@ class Settings(BaseSettings):
 
     # Phase 2: hybrid + rerank
     rerank_enabled: bool = True
-    # "api" = OpenRouter's hosted cross-encoder rerank endpoint
+    # OpenRouter hosted cross-encoder rerank endpoint
     # (https://openrouter.ai/api/v1/rerank — real cross-encoder scores,
-    # ~$0.001/call, ~1.5s for 40 chunks); "local" = sentence-transformers
-    # cross-encoder on this machine. API is the default: the free LLM scorer
-    # it replaced was quota-capped (50 req/day) and scored unreliably.
-    rerank_backend: str = "api"
-    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # local backend only
-    # OpenRouter rerank model (backend "api"). Confirmed live with the
-    # project key: cohere/rerank-v3.5.
-    rerank_api_model: str = "cohere/rerank-v3.5"
+    # ~$0.000002/call for 40 chunks on voyage-lite). No local models: the
+    # sentence-transformers fallback was removed (laptop thermals).
+    rerank_api_model: str = "voyageai/rerank-2.5-lite"
     rerank_api_timeout: float = 20.0
-    # When the API call fails (network, provider outage), degrade to the
-    # local cross-encoder instead of silently skipping the rerank.
-    rerank_api_fallback_to_local: bool = True
     # Flatness guard: when the reranker's top scores sit within this spread,
     # its re-ordering is noise — rerank() keeps the pre-rerank fused order
     # instead (scores still attached; downstream sorts are stable). Measured
