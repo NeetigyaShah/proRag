@@ -7,6 +7,7 @@ failure or parse failure.
 """
 
 import importlib.util
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,8 @@ import fitz  # PyMuPDF
 
 from prorag.ingest.chunk import Element
 from prorag.settings import settings
+
+logger = logging.getLogger(__name__)
 
 # Probe WITHOUT importing: `import docling` pulls torch, which costs ~30-75s
 # of process start on this machine. find_spec only checks the package exists;
@@ -312,9 +315,17 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
                 if table_df is not None:
                     columns = [str(c) for c in table_df.columns]
                     rows = table_df.to_dict(orient="records")
+                    # 2.117: caption_text is a METHOD (FloatingItem.caption_text)
+                    # — calling a bound method with no doc raises; swallow it.
+                    caption = None
+                    try:
+                        raw = item.caption_text
+                        caption = raw() if callable(raw) else raw
+                    except Exception:
+                        caption = None
                     tables.append(
                         ParsedTable(
-                            caption=getattr(item, "caption_text", None) or None,
+                            caption=caption,
                             columns=columns,
                             rows=rows,
                             page_no=page_no,
@@ -333,6 +344,21 @@ def try_docling_parse(data: bytes, mime: str, filename: str) -> ParsedDocument |
         # after a successful parse, 500-ing the ingest and orphaning the blob.
         num_pages = getattr(dl_doc, "num_pages", None)
         page_count = num_pages() if callable(num_pages) else num_pages
+
+        # Completeness gate: on memory-constrained machines the layout pipeline
+        # OOMs mid-book and SILENTLY drops pages (a 474-page PDF came back with
+        # 14 pages of text). A hollow parse is worse than the fallback — treat
+        # < 50% page coverage as failure so core.py falls back to the PyMuPDF
+        # text path (complete text, no bboxes/headings).
+        covered = {e.page for e in prose} | {t.page_no for t in tables if t.page_no}
+        if page_count and covered and len(covered) / page_count < 0.5:
+            logger.warning(
+                "docling covered only %d/%d pages of %s — falling back",
+                len(covered),
+                page_count,
+                filename,
+            )
+            return None
 
         return ParsedDocument(prose=prose, tables=tables, page_count=page_count)
     except Exception:
