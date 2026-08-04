@@ -2,17 +2,24 @@
 
 Text in, cited answer out. See `ARCHITECTURE.md` for the full design and current status.
 
-Core scope: PDF/txt/md/DOCX/PPTX/CSV/XLSX ingestion, structure-aware ~700-token chunking,
-hybrid retrieval (vector + BM25 + structured), RRF fusion, SSE streaming with `[Sn]`
-citations, a pdf.js viewer that opens the cited page with the sentence highlighted, and a
-multi-user layer — identity (OIDC + local accounts), ACL enforcement, per-user budgets,
-an S3 connector, and an admin API. The one open build item is the admin dashboard UI (#25).
+Core scope: PDF/txt/md/DOCX/PPTX/CSV/XLSX ingestion — plus scanned PDFs and images
+(`.png/.jpg/.jpeg/.tiff/.webp`) transcribed by a paid OpenRouter vision model (no local
+OCR) — structure-aware ~700-token chunking, hybrid retrieval (vector + BM25 + structured),
+RRF fusion, hosted cross-encoder reranking with a flatness guard, floor-only context
+cropping, SSE streaming with `[Sn]` citations, a pdf.js viewer that highlights the cited
+text, and a multi-user layer — identity (OIDC + local accounts), ACL enforcement, per-user
+budgets, an S3 connector, and an admin API. The one open build item is the admin dashboard
+UI (#25). **All model inference is API-based — no local ML models** (ADR 0003).
 
 ## Setup
 
+One command: `./setup.sh` — docker check, `.env` generation, compose up, migrations,
+admin seeding, health summary. See `QUICKSTART.md` for the full walkthrough and
+`DEPLOYMENT.md` for the production path. For local development without Docker:
+
 ```bash
 cp .env.example .env
-# fill in OPENAI_API_KEY (or point EMBED_MODEL/ANSWER_MODEL at any LiteLLM-supported provider)
+# fill in OPENROUTER_API_KEY (rerank, OCR, embeddings and answers all bill against it)
 
 docker compose up -d postgres
 uv sync   # or: pip install -e ".[dev]"
@@ -194,3 +201,10 @@ real streamed token usage (#13), and the reverse-proxy defects (#14).
 designed via Open Design), a login UI, a background ingestion worker, connectors beyond
 S3, and SCIM. Optional Phase 7 ideas (query decomposition, HyDE, per-collection
 embeddings, ColBERT) remain speculative until the eval numbers say otherwise.
+
+**Latest (Aug 2026):** OCR ingestion for scans and images via OpenRouter vision models;
+the free-tier LLM reranker replaced by a hosted cross-encoder (`voyageai/rerank-2.5-lite`,
+~$0.000002/call) with a flatness guard that keeps the fused order when scores can't
+discriminate; floor-only cropping (no spike starvation); all local ML models removed
+(laptop thermals); one-command Docker setup, backup/restore scripts, QUICKSTART and
+DEPLOYMENT guides.

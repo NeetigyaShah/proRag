@@ -19,6 +19,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 2g
 
   api:
     # image: tags the versioned bundle (ghcr.io/...:v0.x per #8's resolution);
@@ -34,10 +38,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     # No command: override — the image's own ENTRYPOINT (docker-entrypoint.sh)
     # runs migrations then execs its CMD, uvicorn with --forwarded-allow-ips=*,
     # which is safe here because 8000 isn't published to the host (see `expose`
     # above), so only the caddy service on the compose network can reach it.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
 
   caddy:
     image: caddy:2-alpine
